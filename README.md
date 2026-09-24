@@ -132,12 +132,14 @@ pip install gsv-tts-lite==0.4.7
 
 > [!TIP]
 > 首次运行时，程序会自动下载所需的预训练模型。
+> 如需离线或 Docker 部署，可设置 `GSV_TTS_AUTO_DOWNLOAD=0`，或在代码中使用 `TTS(auto_download_models=False)` 禁止自动下载。此时需要提前准备完整的 `models_dir`，至少包含 `chinese-hubert-base/`、`g2p/`、`sv/pretrained_eres2netv2w24s4ep4.ckpt`。
 
 #### 1. 基础推理
 ```python
 from gsv_tts import TTS
 
 tts = TTS(use_bert=True)
+# tts = TTS(use_bert=True, auto_download_models=False) 离线/容器部署时禁止自动下载
 # tts = TTS(use_flash_attn=True) 如果安装了Flash Attention，建议这样设置
 
 # 将 GPT 模型权重从指定路径加载到内存中，这里加载默认模型。

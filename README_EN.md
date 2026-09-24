@@ -132,12 +132,14 @@ pip install gsv-tts-lite==0.4.7
 
 > [!TIP]
 > The program will automatically download the required pre-trained models upon the first run.
+> For offline or Docker deployments, set `GSV_TTS_AUTO_DOWNLOAD=0` or use `TTS(auto_download_models=False)` to disable automatic downloads. In that mode, provide a complete `models_dir` in advance, including at least `chinese-hubert-base/`, `g2p/`, and `sv/pretrained_eres2netv2w24s4ep4.ckpt`.
 
 #### 1. Basic Inference
 ```python
 from gsv_tts import TTS
 
 tts = TTS()
+# tts = TTS(auto_download_models=False) # Disable automatic downloads for offline/container deployments.
 # tts = TTS(use_bert=True) # Recommended setting for better Chinese synthesis results.
 # tts = TTS(use_flash_attn=True) # Recommended setting if Flash Attention is installed.
 

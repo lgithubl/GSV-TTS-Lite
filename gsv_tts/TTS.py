@@ -35,6 +35,23 @@ from .Config import Config, global_config
 from .GPT_SoVITS.G2P import Pause
 
 
+def _env_flag_enabled(name: str, default: bool = True) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _require_model_paths(paths: list[Path], reason: str):
+    missing = [str(path) for path in paths if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            reason
+            + " Missing required model files/directories: "
+            + ", ".join(missing)
+        )
+
+
 class TTS:
     def __init__(
         self,
@@ -48,6 +65,7 @@ class TTS:
         use_jieba_fast: bool = False,
         always_load_cnhubert: bool = False,
         always_load_sv: bool = False,
+        auto_download_models: bool | None = None,
     ):
         """
         Initializes GSV TTS engine.
@@ -63,6 +81,8 @@ class TTS:
             use_jieba_fast (bool): Whether to use jieba-fast for faster Chinese text segmentation. `jieba-fast` needs to be installed.
             always_load_cnhubert (bool): Whether to keep the CNHubert model loaded in VRAM. Set to True to accelerate Voice Conversion.
             always_load_sv (bool): Whether to keep the Speaker Verification model loaded in VRAM. Set to True to accelerate Speaker Verification.
+            auto_download_models (bool | None): Whether to download missing pretrained models automatically.
+                If None, reads GSV_TTS_AUTO_DOWNLOAD. Defaults to True.
         """
 
         self.tts_config = Config()
@@ -110,20 +130,44 @@ class TTS:
         self.default_gpt_path = Path(self.models_dir) / "s1v3.ckpt"
         self.default_sovits_path = Path(self.models_dir) / "s2Gv2ProPlus.pth"
 
-        check_pretrained_models(self.models_dir)
+        if auto_download_models is None:
+            auto_download_models = _env_flag_enabled("GSV_TTS_AUTO_DOWNLOAD", True)
+
+        if auto_download_models:
+            check_pretrained_models(self.models_dir)
+        else:
+            _require_model_paths(
+                [self.cnhubert_path, Path(self.models_dir) / "g2p", self.sv_path],
+                "Automatic model download is disabled. Set GSV_TTS_AUTO_DOWNLOAD=1 "
+                "or provide a complete models_dir.",
+            )
         
         if use_bert:
             # CPU 场景：下载 INT8 ONNX 模型
             if self.tts_config.device.type == "cpu":
                 int8_onnx_path = self.cnroberta_path / "cnroberta_int8_dynamic.onnx"
                 if not int8_onnx_path.exists():
-                    download_cnroberta_int8(dir=self.cnroberta_path)
+                    if auto_download_models:
+                        download_cnroberta_int8(dir=self.cnroberta_path)
+                    else:
+                        _require_model_paths(
+                            [int8_onnx_path],
+                            "Automatic model download is disabled and use_bert=True "
+                            "requires the CNRoberta INT8 ONNX model.",
+                        )
             # GPU 场景：下载原始 PyTorch 模型
             elif not os.path.exists(self.cnroberta_path):
-                download_model(
-                    filename="chinese-roberta.zip",
-                    dir=self.models_dir,
-                )
+                if auto_download_models:
+                    download_model(
+                        filename="chinese-roberta.zip",
+                        dir=self.models_dir,
+                    )
+                else:
+                    _require_model_paths(
+                        [self.cnroberta_path],
+                        "Automatic model download is disabled and use_bert=True "
+                        "requires the CNRoberta model directory.",
+                    )
             self.tts_config.cnroberta = CNRoberta(self.cnroberta_path, self.tts_config)
         
         self.cnhubert_model = None
