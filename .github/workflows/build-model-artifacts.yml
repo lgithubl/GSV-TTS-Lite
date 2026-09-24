@@ -12,6 +12,7 @@ on:
           - all
           - cpu
           - gpu
+          - refs-jp
 
 permissions:
   contents: read
@@ -22,10 +23,49 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
       - name: Install tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends unzip
+
+      - name: Prepare Japanese default refs package
+        if: ${{ inputs.package == 'all' || inputs.package == 'refs-jp' || inputs.package == 'cpu' || inputs.package == 'gpu' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p refs-jp/refs
+          cp examples/laffey.mp3 refs-jp/refs/speaker.mp3
+          cp examples/AnAn.ogg refs-jp/refs/prompt.ogg
+          cat > refs-jp/docker.env <<'EOF'
+          DEFAULT_SPEAKER_AUDIO=/refs/speaker.mp3
+          DEFAULT_PROMPT_AUDIO=/refs/prompt.ogg
+          DEFAULT_PROMPT_TEXT=ちが……ちがう。レイア、貴様は間違っている。
+          EOF
+          cat > refs-jp/README.md <<'EOF'
+          # GSV-TTS-Lite Japanese default refs
+
+          This package contains the reference files matching the default Docker
+          environment variables:
+
+          - `DEFAULT_SPEAKER_AUDIO=/refs/speaker.mp3`
+          - `DEFAULT_PROMPT_AUDIO=/refs/prompt.ogg`
+          - `DEFAULT_PROMPT_TEXT=ちが……ちがう。レイア、貴様は間違っている。`
+
+          Mount the `refs` directory to `/refs` when running the Docker image.
+          EOF
+          find refs-jp -maxdepth 2 -type f -print
+
+      - name: Upload Japanese default refs package
+        if: ${{ inputs.package == 'all' || inputs.package == 'refs-jp' || inputs.package == 'cpu' || inputs.package == 'gpu' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: gsv-tts-default-refs-jp
+          path: refs-jp
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Download CPU model package
         if: ${{ inputs.package == 'all' || inputs.package == 'cpu' }}
@@ -62,6 +102,59 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Prepare CPU runtime package with Japanese defaults
+        if: ${{ inputs.package == 'all' || inputs.package == 'cpu' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p runtime-cpu-jp
+          cp -a models-cpu runtime-cpu-jp/models
+          cp -a refs-jp/refs runtime-cpu-jp/refs
+          cp refs-jp/docker.env runtime-cpu-jp/docker.env
+          cat > runtime-cpu-jp/run-docker.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          IMAGE="${1:-ghcr.io/lgithubl/gsv-tts-lite:web}"
+
+          docker run --rm -p 8000:8000 \
+            -v "$PWD/models:/models" \
+            -v "$PWD/refs:/refs" \
+            -v "$PWD/outputs:/outputs" \
+            --env-file docker.env \
+            -e GSV_TTS_AUTO_DOWNLOAD=0 \
+            -e GSV_TTS_USE_BERT=0 \
+            "$IMAGE"
+          EOF
+          chmod +x runtime-cpu-jp/run-docker.sh
+          cat > runtime-cpu-jp/README.md <<'EOF'
+          # GSV-TTS-Lite CPU runtime with Japanese defaults
+
+          This package contains:
+
+          - `models/`: CPU-friendly pretrained models.
+          - `refs/`: Japanese default speaker and prompt reference audio.
+          - `docker.env`: default Japanese reference environment variables.
+          - `run-docker.sh`: local Docker launcher.
+
+          Run from this directory:
+
+          ```bash
+          mkdir -p outputs
+          bash run-docker.sh
+          ```
+          EOF
+          du -sh runtime-cpu-jp
+
+      - name: Upload CPU runtime package with Japanese defaults
+        if: ${{ inputs.package == 'all' || inputs.package == 'cpu' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: gsv-tts-runtime-cpu-jp
+          path: runtime-cpu-jp
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Download GPU model package
         if: ${{ inputs.package == 'all' || inputs.package == 'gpu' }}
         shell: bash
@@ -92,5 +185,57 @@ jobs:
         with:
           name: gsv-tts-models-gpu
           path: models-gpu
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Prepare GPU runtime package with Japanese defaults
+        if: ${{ inputs.package == 'all' || inputs.package == 'gpu' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p runtime-gpu-jp
+          cp -a models-gpu runtime-gpu-jp/models
+          cp -a refs-jp/refs runtime-gpu-jp/refs
+          cp refs-jp/docker.env runtime-gpu-jp/docker.env
+          cat > runtime-gpu-jp/run-docker.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          IMAGE="${1:-ghcr.io/lgithubl/gsv-tts-lite:web}"
+
+          docker run --rm --gpus all -p 8000:8000 \
+            -v "$PWD/models:/models" \
+            -v "$PWD/refs:/refs" \
+            -v "$PWD/outputs:/outputs" \
+            --env-file docker.env \
+            -e GSV_TTS_AUTO_DOWNLOAD=0 \
+            "$IMAGE"
+          EOF
+          chmod +x runtime-gpu-jp/run-docker.sh
+          cat > runtime-gpu-jp/README.md <<'EOF'
+          # GSV-TTS-Lite GPU runtime with Japanese defaults
+
+          This package contains:
+
+          - `models/`: GPU pretrained models with full Chinese Roberta files.
+          - `refs/`: Japanese default speaker and prompt reference audio.
+          - `docker.env`: default Japanese reference environment variables.
+          - `run-docker.sh`: local Docker launcher.
+
+          Run from this directory:
+
+          ```bash
+          mkdir -p outputs
+          bash run-docker.sh
+          ```
+          EOF
+          du -sh runtime-gpu-jp
+
+      - name: Upload GPU runtime package with Japanese defaults
+        if: ${{ inputs.package == 'all' || inputs.package == 'gpu' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: gsv-tts-runtime-gpu-jp
+          path: runtime-gpu-jp
           if-no-files-found: error
           retention-days: 30

@@ -157,6 +157,17 @@ docker run --rm -p 8000:8000 \
   ghcr.io/lgithubl/gsv-tts-lite:web
 ```
 
+如需离线模型包，可在 GitHub `Actions` 页面运行 `Build Model Artifacts`：
+
+- `gsv-tts-models-cpu` / `gsv-tts-models-gpu`：仅模型目录。
+- `gsv-tts-default-refs-jp`：与默认 `DEFAULT_SPEAKER_AUDIO`、`DEFAULT_PROMPT_AUDIO`、`DEFAULT_PROMPT_TEXT` 匹配的日文参考音频和 `docker.env`。
+- `gsv-tts-runtime-cpu-jp` / `gsv-tts-runtime-gpu-jp`：已打包 `models/`、`refs/`、`docker.env` 和 `run-docker.sh`，下载解压后可直接运行：
+
+```bash
+mkdir -p outputs
+bash run-docker.sh
+```
+
 ### Python SDK 接口调用
 
 > [!TIP]
