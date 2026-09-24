@@ -1,0 +1,28 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PORT=8000 \
+    MODELS_DIR=/models \
+    REFS_DIR=/refs \
+    OUTPUTS_DIR=/outputs \
+    GSV_TTS_AUTO_DOWNLOAD=0
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libsndfile1 ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md LICENSE ./
+COPY gsv_tts ./gsv_tts
+COPY docker ./docker
+
+RUN pip install --no-cache-dir fastapi uvicorn[standard] \
+    && pip install --no-cache-dir .
+
+RUN mkdir -p /models /refs /outputs
+
+EXPOSE 8000
+VOLUME ["/models", "/refs", "/outputs"]
+
+CMD ["sh", "-c", "uvicorn docker.web_app:app --host 0.0.0.0 --port ${PORT}"]

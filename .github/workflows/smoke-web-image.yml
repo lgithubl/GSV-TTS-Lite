@@ -1,0 +1,86 @@
+name: Smoke Test Web Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Docker image to run
+        required: true
+        default: ghcr.io/lgithubl/gsv-tts-lite:web
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  smoke:
+    name: Run image and capture page
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Login to GitHub Container Registry
+        if: ${{ startsWith(inputs.image, 'ghcr.io/') }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull image
+        run: docker pull "${{ inputs.image }}"
+
+      - name: Start server
+        run: |
+          mkdir -p "$RUNNER_TEMP/gsv-models" "$RUNNER_TEMP/gsv-refs" "$RUNNER_TEMP/gsv-outputs"
+          docker run -d --name gsv-tts-smoke \
+            -p 8000:8000 \
+            -v "$RUNNER_TEMP/gsv-models:/models" \
+            -v "$RUNNER_TEMP/gsv-refs:/refs" \
+            -v "$RUNNER_TEMP/gsv-outputs:/outputs" \
+            -e GSV_TTS_AUTO_DOWNLOAD=0 \
+            "${{ inputs.image }}"
+
+      - name: Wait for server
+        run: |
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8000/ >/tmp/gsv-tts-index.html; then
+              exit 0
+            fi
+            docker logs --tail 80 gsv-tts-smoke || true
+            sleep 2
+          done
+          docker logs gsv-tts-smoke || true
+          exit 1
+
+      - name: Check HTTP endpoints
+        run: |
+          curl -fsS http://127.0.0.1:8000/health | tee /tmp/gsv-tts-health.json | grep -q '"ok":true'
+          curl -fsS http://127.0.0.1:8000/ | grep -q 'GSV-TTS-Lite'
+
+      - name: Capture screenshot
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright@1.56.1
+          npx playwright install --with-deps chromium
+          npx playwright screenshot --wait-for-timeout=2000 http://127.0.0.1:8000/ /tmp/gsv-tts-home.png
+
+      - name: Collect logs
+        if: always()
+        run: |
+          docker logs gsv-tts-smoke >/tmp/gsv-tts-container.log 2>&1 || true
+          docker ps -a >/tmp/gsv-tts-docker-ps.txt || true
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: gsv-tts-web-smoke
+          path: |
+            /tmp/gsv-tts-home.png
+            /tmp/gsv-tts-index.html
+            /tmp/gsv-tts-health.json
+            /tmp/gsv-tts-container.log
+            /tmp/gsv-tts-docker-ps.txt
+          if-no-files-found: warn
+          retention-days: 7
