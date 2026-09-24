@@ -128,6 +128,35 @@ pip install gsv-tts-lite==0.4.7
 2. **核心文档**：
    [进入 API 详细指南目录 ➔](https://github.com/chinokikiss/GSV-TTS-Lite/tree/main/API)
 
+### Docker Web 镜像
+
+本 fork 提供 `Build Web Docker Image` Action，可构建网页/API 镜像并上传可下载的本地镜像包。
+
+1. 在 GitHub `Actions` 页面运行 `Build Web Docker Image`，保持 `export_artifact=true`。
+2. 运行完成后，在该 run 的 `Artifacts` 下载 `gsv-tts-lite-web-web`。
+3. 解压下载得到的 zip，里面包含 `gsv-tts-lite-web-web.tar.gz`。
+4. 本地加载镜像：
+
+```bash
+gzip -dc gsv-tts-lite-web-web.tar.gz | docker load
+docker image inspect ghcr.io/lgithubl/gsv-tts-lite:web
+```
+
+加载后可配合模型目录和参考音频启动：
+
+```bash
+docker run --rm -p 8000:8000 \
+  -v "$PWD/models:/models" \
+  -v "$PWD/refs:/refs" \
+  -v "$PWD/outputs:/outputs" \
+  -e GSV_TTS_AUTO_DOWNLOAD=0 \
+  -e GSV_TTS_USE_BERT=0 \
+  -e DEFAULT_SPEAKER_AUDIO=/refs/speaker.mp3 \
+  -e DEFAULT_PROMPT_AUDIO=/refs/prompt.ogg \
+  -e DEFAULT_PROMPT_TEXT='ちが……ちがう。レイア、貴様は間違っている。' \
+  ghcr.io/lgithubl/gsv-tts-lite:web
+```
+
 ### Python SDK 接口调用
 
 > [!TIP]
