@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -21,6 +21,8 @@ DEFAULT_PROMPT_AUDIO = os.environ.get("DEFAULT_PROMPT_AUDIO", "/refs/prompt.wav"
 DEFAULT_PROMPT_TEXT = os.environ.get("DEFAULT_PROMPT_TEXT", "")
 DEFAULT_TEXT_LANGUAGE = os.environ.get("DEFAULT_TEXT_LANGUAGE", "auto")
 DEFAULT_PROMPT_LANGUAGE = os.environ.get("DEFAULT_PROMPT_LANGUAGE", "auto")
+GSVI_VERSION = os.environ.get("GSVI_VERSION", "v2ProPlus")
+GSVI_MODEL_NAME = os.environ.get("GSVI_MODEL_NAME", "default-refs")
 
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -98,6 +100,22 @@ class TTSRequest(BaseModel):
     repetition_penalty: float = 1.35
     noise_scale: float = 0.5
     speed: float = 1.0
+
+
+class GSVIModelsRequest(BaseModel):
+    version: str | None = None
+
+
+class GSVIInferRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2000)
+    text_lang: str | None = None
+    prompt_text_lang: str | None = None
+    top_k: int = 15
+    top_p: float = 1.0
+    temperature: float = 1.0
+    repetition_penalty: float = 1.35
+    speed_facter: float | None = None
+    speed_factor: float | None = None
 
 
 def _normalize_language(value: str | None, default: str = "auto") -> Literal["auto", "ja", "zh", "en"]:
@@ -306,6 +324,56 @@ async def synthesize_gptsovits_compatible(
     )
     output_path = await _synthesize_to_file(request)
     return FileResponse(output_path, media_type="audio/wav", filename=output_path.name)
+
+
+def _gsvi_models_payload(version: str | None = None) -> dict:
+    return {
+        "version": version or GSVI_VERSION,
+        "models": {
+            GSVI_MODEL_NAME: {
+                "speaker_audio": DEFAULT_SPEAKER_AUDIO,
+                "prompt_audio": DEFAULT_PROMPT_AUDIO,
+                "prompt_language": DEFAULT_PROMPT_LANGUAGE,
+            }
+        },
+    }
+
+
+@app.get("/version")
+async def gsvi_versions():
+    return [GSVI_VERSION]
+
+
+@app.post("/models")
+async def gsvi_models(request: GSVIModelsRequest | None = None):
+    version = request.version if request else None
+    return _gsvi_models_payload(version)
+
+
+@app.get("/models/{version}")
+async def gsvi_models_for_version(version: str):
+    return _gsvi_models_payload(version)
+
+
+@app.post("/infer_single")
+async def gsvi_infer_single(payload: GSVIInferRequest, request: Request):
+    tts_request = TTSRequest(
+        text=payload.text,
+        text_language=_normalize_language(payload.text_lang, DEFAULT_TEXT_LANGUAGE),
+        prompt_language=_normalize_language(None, DEFAULT_PROMPT_LANGUAGE),
+        top_k=payload.top_k,
+        top_p=payload.top_p,
+        temperature=payload.temperature,
+        repetition_penalty=payload.repetition_penalty,
+        speed=payload.speed_facter
+        if payload.speed_facter is not None
+        else (payload.speed_factor if payload.speed_factor is not None else 1.0),
+    )
+    output_path = await _synthesize_to_file(tts_request)
+    return {
+        "msg": "success",
+        "audio_url": str(request.url_for("audio", filename=output_path.name)),
+    }
 
 
 @app.get("/audio/{filename}")

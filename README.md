@@ -172,13 +172,18 @@ bash run-docker.sh
 
 #### LunaTranslator 对接
 
-Docker Web 服务同时提供 GPT-SoVITS 兼容接口，可在 LunaTranslator 中直接选择内置 `GPT-SoVITS`：
+Docker Web 服务同时提供 GPT-SoVITS / GSVI 兼容接口，可在 LunaTranslator 中直接选择内置 `GPT-SoVITS`。
 
-- repo：`RVC-Boss/GPT-SoVITS`
-- API version：`v2`
+如果需要 Luna 显示声音下拉框，使用 GSVI 模式：
+
+- repo：`AI-Hobbyist/GPT-SoVITS-Inference`
 - URL：`http://127.0.0.1:8000`
 
-Luna 会请求 `GET /tts`。本服务兼容 `text_lang` / `text_language`、`speed_factor` / `speed`、`prompt_lang` / `prompt_language` 等参数。使用上面的日文 refs 包时，`DEFAULT_PROMPT_LANGUAGE=ja` 已经写入 `docker.env`，源文本语言可在 Luna 里按原文选择 `日语`、`简体中文` 或 `自动`。
+Luna 会请求 `GET /version`、`POST /models` 或 `GET /models/{version}` 获取声音列表，并通过 `POST /infer_single` 合成语音。本服务会暴露一个默认声音 `default-refs`，实际音色来自当前容器挂载的 `/refs` 和 `DEFAULT_*` 环境变量。
+
+如果使用 `RVC-Boss/GPT-SoVITS` 模式，Luna 本身不会请求声音列表，只会直接请求 `GET /tts` 合成语音。本服务也兼容该模式的 `text_lang` / `text_language`、`speed_factor` / `speed`、`prompt_lang` / `prompt_language` 等参数。
+
+使用上面的日文 refs 包时，`DEFAULT_PROMPT_LANGUAGE=ja` 已经写入 `docker.env`，源文本语言可在 Luna 里按原文选择 `日语`、`简体中文` 或 `自动`。
 
 ### Python SDK 接口调用
 
