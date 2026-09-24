@@ -17,7 +17,10 @@ COPY pyproject.toml README.md LICENSE ./
 COPY gsv_tts ./gsv_tts
 COPY docker ./docker
 
-RUN pip install --no-cache-dir fastapi uvicorn[standard] \
+RUN pip install --no-cache-dir \
+        torch torchaudio \
+        --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir fastapi uvicorn[standard] \
     && pip install --no-cache-dir .
 
 RUN mkdir -p /models /refs /outputs

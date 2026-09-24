@@ -1,0 +1,163 @@
+name: HTTP Test Web Image With Models
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Docker image to run
+        required: true
+        default: ghcr.io/lgithubl/gsv-tts-lite:web
+      model_artifact:
+        description: Model artifact name
+        required: true
+        default: gsv-tts-models-cpu
+        type: choice
+        options:
+          - gsv-tts-models-cpu
+          - gsv-tts-models-gpu
+      model_run_id:
+        description: Optional Build Model Artifacts run id. Empty means latest successful run.
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: read
+  actions: read
+
+jobs:
+  http-test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Login to GitHub Container Registry
+        if: ${{ startsWith(inputs.image, 'ghcr.io/') }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull image
+        run: docker pull "${{ inputs.image }}"
+
+      - name: Resolve model artifact run
+        id: model-run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          RUN_ID="${{ inputs.model_run_id }}"
+          if [ -z "$RUN_ID" ]; then
+            RUN_ID="$(gh run list \
+              --repo "${{ github.repository }}" \
+              --workflow "Build Model Artifacts" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "No successful Build Model Artifacts run found." >&2
+            exit 1
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Download model artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/gsv-models-artifact"
+          gh run download "${{ steps.model-run.outputs.run_id }}" \
+            --repo "${{ github.repository }}" \
+            --name "${{ inputs.model_artifact }}" \
+            --dir "$RUNNER_TEMP/gsv-models-artifact"
+          find "$RUNNER_TEMP/gsv-models-artifact" -maxdepth 2 -type d -print
+
+      - name: Prepare refs and volumes
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/gsv-models" "$RUNNER_TEMP/gsv-refs" "$RUNNER_TEMP/gsv-outputs"
+          cp -a "$RUNNER_TEMP/gsv-models-artifact"/. "$RUNNER_TEMP/gsv-models/"
+          cp examples/laffey.mp3 "$RUNNER_TEMP/gsv-refs/speaker.mp3"
+          cp examples/AnAn.ogg "$RUNNER_TEMP/gsv-refs/prompt.ogg"
+          du -sh "$RUNNER_TEMP/gsv-models"
+
+      - name: Start server with models
+        run: |
+          docker run -d --name gsv-tts-http \
+            -p 8000:8000 \
+            -v "$RUNNER_TEMP/gsv-models:/models" \
+            -v "$RUNNER_TEMP/gsv-refs:/refs" \
+            -v "$RUNNER_TEMP/gsv-outputs:/outputs" \
+            -e GSV_TTS_AUTO_DOWNLOAD=0 \
+            -e GSV_TTS_USE_BERT=0 \
+            -e DEFAULT_SPEAKER_AUDIO=/refs/speaker.mp3 \
+            -e DEFAULT_PROMPT_AUDIO=/refs/prompt.ogg \
+            -e DEFAULT_PROMPT_TEXT='ちが……ちがう。レイア、貴様は間違っている。' \
+            "${{ inputs.image }}"
+
+      - name: Wait for server
+        run: |
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8000/health | tee /tmp/gsv-health.json | grep -q '"ok":true'; then
+              exit 0
+            fi
+            docker logs --tail 80 gsv-tts-http || true
+            sleep 2
+          done
+          docker logs gsv-tts-http || true
+          exit 1
+
+      - name: HTTP synthesis test
+        shell: bash
+        run: |
+          curl -fsS -X POST http://127.0.0.1:8000/api/tts \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "text": "こんにちは、これはテストです。",
+              "text_language": "ja",
+              "prompt_language": "ja"
+            }' \
+            -o /tmp/gsv-output.wav
+          test -s /tmp/gsv-output.wav
+          python - <<'PY'
+          import wave
+          with wave.open("/tmp/gsv-output.wav", "rb") as wav:
+              assert wav.getnframes() > 0
+              print("channels", wav.getnchannels())
+              print("rate", wav.getframerate())
+              print("frames", wav.getnframes())
+          PY
+
+      - name: Capture screenshot
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright@1.56.1
+          npx playwright install --with-deps chromium
+          npx playwright screenshot --wait-for-timeout=2000 http://127.0.0.1:8000/ /tmp/gsv-tts-home.png
+
+      - name: Collect logs
+        if: always()
+        run: |
+          docker logs gsv-tts-http >/tmp/gsv-tts-container.log 2>&1 || true
+          docker ps -a >/tmp/gsv-tts-docker-ps.txt || true
+
+      - name: Upload HTTP test artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: gsv-tts-http-test
+          path: |
+            /tmp/gsv-health.json
+            /tmp/gsv-output.wav
+            /tmp/gsv-tts-home.png
+            /tmp/gsv-tts-container.log
+            /tmp/gsv-tts-docker-ps.txt
+          if-no-files-found: warn
+          retention-days: 7

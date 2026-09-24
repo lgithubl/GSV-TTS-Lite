@@ -8,6 +8,7 @@ on:
       - "gsv_tts/**"
       - "docker/**"
       - "Dockerfile.web"
+      - "pyproject.toml"
       - ".dockerignore"
       - ".github/workflows/build-web-image.yml"
   workflow_dispatch:
