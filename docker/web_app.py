@@ -19,6 +19,8 @@ OUTPUTS_DIR = Path(os.environ.get("OUTPUTS_DIR", "/outputs"))
 DEFAULT_SPEAKER_AUDIO = os.environ.get("DEFAULT_SPEAKER_AUDIO", "/refs/speaker.wav")
 DEFAULT_PROMPT_AUDIO = os.environ.get("DEFAULT_PROMPT_AUDIO", "/refs/prompt.wav")
 DEFAULT_PROMPT_TEXT = os.environ.get("DEFAULT_PROMPT_TEXT", "")
+DEFAULT_TEXT_LANGUAGE = os.environ.get("DEFAULT_TEXT_LANGUAGE", "auto")
+DEFAULT_PROMPT_LANGUAGE = os.environ.get("DEFAULT_PROMPT_LANGUAGE", "auto")
 
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -96,6 +98,80 @@ class TTSRequest(BaseModel):
     repetition_penalty: float = 1.35
     noise_scale: float = 0.5
     speed: float = 1.0
+
+
+def _normalize_language(value: str | None, default: str = "auto") -> Literal["auto", "ja", "zh", "en"]:
+    if not value:
+        value = default
+    value = value.strip().lower().replace("_", "-")
+    aliases = {
+        "auto": "auto",
+        "ja": "ja",
+        "jp": "ja",
+        "jpn": "ja",
+        "japanese": "ja",
+        "日语": "ja",
+        "日語": "ja",
+        "日本語": "ja",
+        "zh": "zh",
+        "zh-cn": "zh",
+        "zh-hans": "zh",
+        "cht": "zh",
+        "zh-tw": "zh",
+        "zh-hant": "zh",
+        "chinese": "zh",
+        "中文": "zh",
+        "简体中文": "zh",
+        "繁体中文": "zh",
+        "繁體中文": "zh",
+        "en": "en",
+        "eng": "en",
+        "english": "en",
+        "英语": "en",
+        "英語": "en",
+    }
+    if value not in aliases:
+        raise HTTPException(status_code=400, detail=f"unsupported language: {value}")
+    return aliases[value]
+
+
+async def _synthesize_to_file(request: TTSRequest) -> Path:
+    speaker_audio = request.speaker_audio or DEFAULT_SPEAKER_AUDIO
+    prompt_audio = request.prompt_audio or DEFAULT_PROMPT_AUDIO
+    prompt_text = request.prompt_text if request.prompt_text else DEFAULT_PROMPT_TEXT
+    if not prompt_text:
+        raise HTTPException(status_code=400, detail="prompt_text is required unless DEFAULT_PROMPT_TEXT is set.")
+    if not Path(speaker_audio).exists():
+        raise HTTPException(status_code=400, detail=f"speaker_audio not found: {speaker_audio}")
+    if not Path(prompt_audio).exists():
+        raise HTTPException(status_code=400, detail=f"prompt_audio not found: {prompt_audio}")
+
+    def _run():
+        tts = _get_tts()
+        clip = tts.infer(
+            spk_audio_path=speaker_audio,
+            prompt_audio_path=prompt_audio,
+            prompt_audio_text=prompt_text,
+            text=request.text,
+            text_language=request.text_language,
+            prompt_language=request.prompt_language,
+            top_k=request.top_k,
+            top_p=request.top_p,
+            temperature=request.temperature,
+            repetition_penalty=request.repetition_penalty,
+            noise_scale=request.noise_scale,
+            speed=request.speed,
+        )
+        output = OUTPUTS_DIR / f"tts_{uuid.uuid4().hex}.wav"
+        clip.save(str(output))
+        return output
+
+    try:
+        return await asyncio.to_thread(_run)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 INDEX_HTML = """<!doctype html>
@@ -190,43 +266,45 @@ async def health():
 
 @app.post("/api/tts")
 async def synthesize(request: TTSRequest):
-    speaker_audio = request.speaker_audio or DEFAULT_SPEAKER_AUDIO
-    prompt_audio = request.prompt_audio or DEFAULT_PROMPT_AUDIO
-    prompt_text = request.prompt_text if request.prompt_text is not None else DEFAULT_PROMPT_TEXT
-    if not prompt_text:
-        raise HTTPException(status_code=400, detail="prompt_text is required unless DEFAULT_PROMPT_TEXT is set.")
-    if not Path(speaker_audio).exists():
-        raise HTTPException(status_code=400, detail=f"speaker_audio not found: {speaker_audio}")
-    if not Path(prompt_audio).exists():
-        raise HTTPException(status_code=400, detail=f"prompt_audio not found: {prompt_audio}")
+    output_path = await _synthesize_to_file(request)
+    return FileResponse(output_path, media_type="audio/wav", filename=output_path.name)
 
-    def _run():
-        tts = _get_tts()
-        clip = tts.infer(
-            spk_audio_path=speaker_audio,
-            prompt_audio_path=prompt_audio,
-            prompt_audio_text=prompt_text,
-            text=request.text,
-            text_language=request.text_language,
-            prompt_language=request.prompt_language,
-            top_k=request.top_k,
-            top_p=request.top_p,
-            temperature=request.temperature,
-            repetition_penalty=request.repetition_penalty,
-            noise_scale=request.noise_scale,
-            speed=request.speed,
-        )
-        output = OUTPUTS_DIR / f"tts_{uuid.uuid4().hex}.wav"
-        clip.save(str(output))
-        return output
 
-    try:
-        output_path = await asyncio.to_thread(_run)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
+@app.get("/tts")
+async def synthesize_gptsovits_compatible(
+    text: str,
+    text_language: str | None = None,
+    text_lang: str | None = None,
+    prompt_language: str | None = None,
+    prompt_lang: str | None = None,
+    speaker_audio: str | None = None,
+    ref_audio_path: str | None = None,
+    prompt_audio: str | None = None,
+    prompt_text: str | None = None,
+    top_k: int = 15,
+    top_p: float = 1.0,
+    temperature: float = 1.0,
+    repetition_penalty: float = 1.35,
+    noise_scale: float = 0.5,
+    speed: float | None = None,
+    speed_factor: float | None = None,
+):
+    ref_audio = ref_audio_path or prompt_audio
+    request = TTSRequest(
+        text=text,
+        speaker_audio=speaker_audio or ref_audio,
+        prompt_audio=ref_audio,
+        prompt_text=prompt_text,
+        text_language=_normalize_language(text_language or text_lang, DEFAULT_TEXT_LANGUAGE),
+        prompt_language=_normalize_language(prompt_language or prompt_lang, DEFAULT_PROMPT_LANGUAGE),
+        top_k=top_k,
+        top_p=top_p,
+        temperature=temperature,
+        repetition_penalty=repetition_penalty,
+        noise_scale=noise_scale,
+        speed=speed_factor if speed_factor is not None else (speed if speed is not None else 1.0),
+    )
+    output_path = await _synthesize_to_file(request)
     return FileResponse(output_path, media_type="audio/wav", filename=output_path.name)
 
 

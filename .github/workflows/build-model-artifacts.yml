@@ -43,6 +43,8 @@ jobs:
           DEFAULT_SPEAKER_AUDIO=/refs/speaker.mp3
           DEFAULT_PROMPT_AUDIO=/refs/prompt.ogg
           DEFAULT_PROMPT_TEXT=ちが……ちがう。レイア、貴様は間違っている。
+          DEFAULT_TEXT_LANGUAGE=auto
+          DEFAULT_PROMPT_LANGUAGE=ja
           EOF
           cat > refs-jp/README.md <<'EOF'
           # GSV-TTS-Lite Japanese default refs
@@ -53,6 +55,8 @@ jobs:
           - `DEFAULT_SPEAKER_AUDIO=/refs/speaker.mp3`
           - `DEFAULT_PROMPT_AUDIO=/refs/prompt.ogg`
           - `DEFAULT_PROMPT_TEXT=ちが……ちがう。レイア、貴様は間違っている。`
+          - `DEFAULT_TEXT_LANGUAGE=auto`
+          - `DEFAULT_PROMPT_LANGUAGE=ja`
 
           Mount the `refs` directory to `/refs` when running the Docker image.
           EOF

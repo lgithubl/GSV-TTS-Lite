@@ -154,6 +154,8 @@ docker run --rm -p 8000:8000 \
   -e DEFAULT_SPEAKER_AUDIO=/refs/speaker.mp3 \
   -e DEFAULT_PROMPT_AUDIO=/refs/prompt.ogg \
   -e DEFAULT_PROMPT_TEXT='ちが……ちがう。レイア、貴様は間違っている。' \
+  -e DEFAULT_TEXT_LANGUAGE=auto \
+  -e DEFAULT_PROMPT_LANGUAGE=ja \
   ghcr.io/lgithubl/gsv-tts-lite:web
 ```
 
@@ -167,6 +169,16 @@ docker run --rm -p 8000:8000 \
 mkdir -p outputs
 bash run-docker.sh
 ```
+
+#### LunaTranslator 对接
+
+Docker Web 服务同时提供 GPT-SoVITS 兼容接口，可在 LunaTranslator 中直接选择内置 `GPT-SoVITS`：
+
+- repo：`RVC-Boss/GPT-SoVITS`
+- API version：`v2`
+- URL：`http://127.0.0.1:8000`
+
+Luna 会请求 `GET /tts`。本服务兼容 `text_lang` / `text_language`、`speed_factor` / `speed`、`prompt_lang` / `prompt_language` 等参数。使用上面的日文 refs 包时，`DEFAULT_PROMPT_LANGUAGE=ja` 已经写入 `docker.env`，源文本语言可在 Luna 里按原文选择 `日语`、`简体中文` 或 `自动`。
 
 ### Python SDK 接口调用
 
