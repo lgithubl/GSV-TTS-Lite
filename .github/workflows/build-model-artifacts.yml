@@ -31,6 +31,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends unzip
 
+      - name: Install model conversion tools
+        if: ${{ inputs.package == 'all' || inputs.package == 'cpu' || inputs.package == 'gpu' }}
+        run: |
+          python3 -m pip install --user --no-cache-dir safetensors
+          python3 -m pip install --user --no-cache-dir \
+            --index-url https://download.pytorch.org/whl/cpu \
+            "torch==2.6.0"
+
       - name: Prepare Japanese default refs package
         if: ${{ inputs.package == 'all' || inputs.package == 'refs-jp' || inputs.package == 'cpu' || inputs.package == 'gpu' }}
         shell: bash
@@ -87,6 +95,9 @@ jobs:
             'https://github.com/chinokikiss/GSV-TTS-Lite/releases/download/g2p/g2p.zip' \
             -o /tmp/gsv-downloads/g2p.zip
           unzip -q /tmp/gsv-downloads/g2p.zip -d models-cpu
+
+          python3 .github/scripts/convert_hf_bins_to_safetensors.py models-cpu
+          python3 .github/scripts/validate_hf_safetensors.py models-cpu
 
           mkdir -p models-cpu/chinese-roberta-wwm-ext-large
           for file in config.json tokenizer.json cnroberta_int8_dynamic.onnx; do
@@ -180,6 +191,9 @@ jobs:
             'https://huggingface.co/cnmds/GPTSoVITS-RT/resolve/main/chinese-roberta.zip?download=true' \
             -o /tmp/gsv-downloads/chinese-roberta.zip
           unzip -q /tmp/gsv-downloads/chinese-roberta.zip -d models-gpu
+
+          python3 .github/scripts/convert_hf_bins_to_safetensors.py models-gpu
+          python3 .github/scripts/validate_hf_safetensors.py models-gpu
 
           du -sh models-gpu
 
