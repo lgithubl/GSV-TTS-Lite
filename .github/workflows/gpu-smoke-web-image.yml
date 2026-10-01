@@ -1,0 +1,165 @@
+name: GPU Smoke Test Web Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Docker image to test on a real NVIDIA GPU runner
+        required: true
+        default: ghcr.io/lgithubl/gsv-tts-lite:m40
+      expected_compute_capability:
+        description: Expected CUDA compute capability. Tesla M40 is 5.2.
+        required: false
+        default: "5.2"
+      run_synthesis:
+        description: Run full TTS synthesis using host_models_dir
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      host_models_dir:
+        description: Existing model directory on the self-hosted GPU runner, required when run_synthesis=true
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  gpu-smoke:
+    name: Run web image on M40 GPU
+    runs-on: [self-hosted, linux, x64, gpu, m40]
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Login to GitHub Container Registry
+        if: ${{ startsWith(inputs.image, 'ghcr.io/') }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check host GPU
+        shell: bash
+        run: |
+          set -euxo pipefail
+          command -v nvidia-smi
+          nvidia-smi
+          docker info
+
+      - name: Pull image
+        shell: bash
+        run: docker pull "${{ inputs.image }}"
+
+      - name: Check PyTorch CUDA inside image
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker run --rm --gpus all \
+            -e EXPECTED_COMPUTE_CAPABILITY="${{ inputs.expected_compute_capability }}" \
+            --entrypoint python \
+            "${{ inputs.image }}" \
+            -c 'import os, torch; print("torch", torch.__version__); print("cuda", torch.version.cuda); assert torch.cuda.is_available(), "CUDA is not available"; props = torch.cuda.get_device_properties(0); cap = f"{props.major}.{props.minor}"; print("device", props.name, cap, props.total_memory); assert cap == os.environ["EXPECTED_COMPUTE_CAPABILITY"], cap'
+
+      - name: Start web server
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/gsv-models" "$RUNNER_TEMP/gsv-refs" "$RUNNER_TEMP/gsv-outputs"
+          docker rm -f gsv-tts-gpu-smoke >/dev/null 2>&1 || true
+          docker run -d --name gsv-tts-gpu-smoke \
+            --gpus all \
+            -p 127.0.0.1::8000 \
+            -v "$RUNNER_TEMP/gsv-models:/models" \
+            -v "$RUNNER_TEMP/gsv-refs:/refs" \
+            -v "$RUNNER_TEMP/gsv-outputs:/outputs" \
+            -e GSV_TTS_AUTO_DOWNLOAD=0 \
+            "${{ inputs.image }}"
+          docker port gsv-tts-gpu-smoke 8000/tcp | sed 's/.*://' > "$RUNNER_TEMP/gsv-tts-port"
+
+      - name: Assert health reports CUDA
+        shell: bash
+        run: |
+          set -euxo pipefail
+          PORT="$(cat "$RUNNER_TEMP/gsv-tts-port")"
+          for i in $(seq 1 90); do
+            if curl -fsS "http://127.0.0.1:${PORT}/health" | tee /tmp/gsv-tts-health.json; then
+              break
+            fi
+            docker logs --tail 120 gsv-tts-gpu-smoke || true
+            sleep 2
+          done
+          grep -q '"ok":true' /tmp/gsv-tts-health.json
+          grep -q '"cuda_available":true' /tmp/gsv-tts-health.json
+          grep -q "\"capability\":\"${{ inputs.expected_compute_capability }}\"" /tmp/gsv-tts-health.json
+
+      - name: Run full synthesis with existing runner models
+        if: ${{ inputs.run_synthesis == 'true' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [ -z "${{ inputs.host_models_dir }}" ] || [ ! -d "${{ inputs.host_models_dir }}" ]; then
+            echo "host_models_dir must point to an existing directory on the self-hosted runner." >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/gsv-refs-full" "$RUNNER_TEMP/gsv-outputs-full"
+          cp examples/laffey.mp3 "$RUNNER_TEMP/gsv-refs-full/speaker.mp3"
+          cp examples/AnAn.ogg "$RUNNER_TEMP/gsv-refs-full/prompt.ogg"
+          docker rm -f gsv-tts-gpu-full >/dev/null 2>&1 || true
+          docker run -d --name gsv-tts-gpu-full \
+            --gpus all \
+            -p 127.0.0.1::8000 \
+            -v "${{ inputs.host_models_dir }}:/models:ro" \
+            -v "$RUNNER_TEMP/gsv-refs-full:/refs:ro" \
+            -v "$RUNNER_TEMP/gsv-outputs-full:/outputs" \
+            -e GSV_TTS_AUTO_DOWNLOAD=0 \
+            -e DEFAULT_SPEAKER_AUDIO=/refs/speaker.mp3 \
+            -e DEFAULT_PROMPT_AUDIO=/refs/prompt.ogg \
+            -e DEFAULT_PROMPT_TEXT='ちが……ちがう。レイア、貴様は間違っている。' \
+            -e DEFAULT_TEXT_LANGUAGE=ja \
+            -e DEFAULT_PROMPT_LANGUAGE=ja \
+            "${{ inputs.image }}"
+          docker port gsv-tts-gpu-full 8000/tcp | sed 's/.*://' > "$RUNNER_TEMP/gsv-tts-full-port"
+          PORT="$(cat "$RUNNER_TEMP/gsv-tts-full-port")"
+          for i in $(seq 1 120); do
+            if curl -fsS "http://127.0.0.1:${PORT}/health" | grep -q '"ok":true'; then
+              break
+            fi
+            docker logs --tail 120 gsv-tts-gpu-full || true
+            sleep 2
+          done
+          curl -fsS -X POST "http://127.0.0.1:${PORT}/api/tts" \
+            -H 'Content-Type: application/json' \
+            -d '{"text":"こんにちは、これはGPUテストです。","text_language":"ja","prompt_language":"ja"}' \
+            -o /tmp/gsv-tts-gpu-output.wav
+          test -s /tmp/gsv-tts-gpu-output.wav
+
+      - name: Collect logs
+        if: always()
+        shell: bash
+        run: |
+          docker logs gsv-tts-gpu-smoke >/tmp/gsv-tts-gpu-smoke.log 2>&1 || true
+          docker logs gsv-tts-gpu-full >/tmp/gsv-tts-gpu-full.log 2>&1 || true
+          docker ps -a >/tmp/gsv-tts-docker-ps.txt || true
+          docker rm -f gsv-tts-gpu-smoke gsv-tts-gpu-full >/dev/null 2>&1 || true
+
+      - name: Upload GPU smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: gsv-tts-gpu-smoke
+          path: |
+            /tmp/gsv-tts-health.json
+            /tmp/gsv-tts-gpu-output.wav
+            /tmp/gsv-tts-gpu-smoke.log
+            /tmp/gsv-tts-gpu-full.log
+            /tmp/gsv-tts-docker-ps.txt
+          if-no-files-found: warn
+          retention-days: 7
