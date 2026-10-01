@@ -16,11 +16,23 @@ on:
       tag:
         description: Image tag
         required: false
-        default: web
+        default: m40
+      torch_version:
+        description: PyTorch version
+        required: false
+        default: "2.5.1"
+      torchaudio_version:
+        description: torchaudio version matching PyTorch
+        required: false
+        default: "2.5.1"
+      pytorch_index_url:
+        description: PyTorch wheel index URL. cu118 is friendlier to Tesla M40 than CPU wheels or newer CUDA defaults.
+        required: false
+        default: https://download.pytorch.org/whl/cu118
       export_artifact:
         description: Export image tar.gz artifact
         required: false
-        default: "true"
+        default: "false"
         type: choice
         options:
           - "true"
@@ -66,6 +78,10 @@ jobs:
           file: Dockerfile.web
           push: true
           tags: ${{ steps.image.outputs.image }}
+          build-args: |
+            TORCH_VERSION=${{ inputs.torch_version }}
+            TORCHAUDIO_VERSION=${{ inputs.torchaudio_version }}
+            PYTORCH_INDEX_URL=${{ inputs.pytorch_index_url }}
 
       - name: Smoke test pushed image
         shell: bash

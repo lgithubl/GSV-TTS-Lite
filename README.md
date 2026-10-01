@@ -130,22 +130,19 @@ pip install gsv-tts-lite==0.4.7
 
 ### Docker Web 镜像
 
-本 fork 提供 `Build Web Docker Image` Action，可构建网页/API 镜像并上传可下载的本地镜像包。
+本 fork 提供 `Build Web Docker Image` Action，可构建网页/API 镜像。默认构建 `ghcr.io/lgithubl/gsv-tts-lite:m40`，使用 CUDA 11.8 版 `torch/torchaudio 2.5.1`，并允许 Tesla M40 的 `sm_52` 设备参与推理。
 
-1. 在 GitHub `Actions` 页面运行 `Build Web Docker Image`，保持 `export_artifact=true`。
-2. 运行完成后，在该 run 的 `Artifacts` 下载 `gsv-tts-lite-web-web`。
-3. 解压下载得到的 zip，里面包含 `gsv-tts-lite-web-web.tar.gz`。
-4. 本地加载镜像：
+如果需要离线镜像包，在 GitHub `Actions` 页面运行 `Build Web Docker Image` 时设置 `export_artifact=true`。运行完成后，在该 run 的 `Artifacts` 下载 `gsv-tts-lite-web-m40`，解压后加载镜像：
 
 ```bash
-gzip -dc gsv-tts-lite-web-web.tar.gz | docker load
-docker image inspect ghcr.io/lgithubl/gsv-tts-lite:web
+gzip -dc gsv-tts-lite-web-m40.tar.gz | docker load
+docker image inspect ghcr.io/lgithubl/gsv-tts-lite:m40
 ```
 
 加载后可配合模型目录和参考音频启动：
 
 ```bash
-docker run --rm -p 8000:8000 \
+docker run --rm --gpus all -p 8000:8000 \
   -v "$PWD/models:/models" \
   -v "$PWD/refs:/refs" \
   -v "$PWD/outputs:/outputs" \
@@ -156,7 +153,17 @@ docker run --rm -p 8000:8000 \
   -e DEFAULT_PROMPT_TEXT='ちが……ちがう。レイア、貴様は間違っている。' \
   -e DEFAULT_TEXT_LANGUAGE=auto \
   -e DEFAULT_PROMPT_LANGUAGE=ja \
-  ghcr.io/lgithubl/gsv-tts-lite:web
+  ghcr.io/lgithubl/gsv-tts-lite:m40
+```
+
+启动后可检查 `/health`，其中 `runtime.cuda_available` 应为 `true`，`runtime.cuda_devices[].capability` 对 M40 应显示 `5.2`。
+
+k3s 中还需要 NVIDIA runtime/device plugin，并在 Pod 中声明 GPU：
+
+```yaml
+resources:
+  limits:
+    nvidia.com/gpu: 1
 ```
 
 如需离线模型包，可在 GitHub `Actions` 页面运行 `Build Model Artifacts`：

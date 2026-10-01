@@ -19,7 +19,7 @@ def get_cuda_device_info(idx: int):
     sm_version = major + minor / 10.0
     mem_gb = props.total_memory / (1024**3)
 
-    if sm_version < 5.3:
+    if sm_version < 5.2:
         return None
 
     device = torch.device(f"cuda:{idx}")
@@ -140,4 +140,4 @@ class GlobalConfig:
 
 global_config = GlobalConfig()
 
-SDPBACKEND = choose_attention_backend()
+SDPBACKEND = choose_attention_backend(dtype=dtype)

@@ -1,5 +1,9 @@
 FROM python:3.11-slim
 
+ARG TORCH_VERSION=2.5.1
+ARG TORCHAUDIO_VERSION=2.5.1
+ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu118
+
 ENV PYTHONUNBUFFERED=1 \
     PORT=8000 \
     MODELS_DIR=/models \
@@ -18,8 +22,8 @@ COPY gsv_tts ./gsv_tts
 COPY docker ./docker
 
 RUN pip install --no-cache-dir \
-        torch torchaudio \
-        --index-url https://download.pytorch.org/whl/cpu \
+        "torch==${TORCH_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}" \
+        --index-url "${PYTORCH_INDEX_URL}" \
     && pip install --no-cache-dir fastapi uvicorn[standard] \
     && pip install --no-cache-dir .
 

@@ -59,6 +59,39 @@ def _model_status() -> dict:
     }
 
 
+def _runtime_status() -> dict:
+    try:
+        import torch
+    except Exception as exc:
+        return {
+            "torch_available": False,
+            "torch_error": str(exc),
+        }
+
+    cuda_available = torch.cuda.is_available()
+    cuda_devices = []
+    if cuda_available:
+        for idx in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(idx)
+            cuda_devices.append(
+                {
+                    "index": idx,
+                    "name": props.name,
+                    "capability": f"{props.major}.{props.minor}",
+                    "memory_gb": round(props.total_memory / (1024**3), 2),
+                }
+            )
+
+    return {
+        "torch_available": True,
+        "torch_version": torch.__version__,
+        "cuda_available": cuda_available,
+        "cuda_version": torch.version.cuda,
+        "cuda_device_count": len(cuda_devices),
+        "cuda_devices": cuda_devices,
+    }
+
+
 def _get_tts():
     global _tts
     with _tts_lock:
@@ -278,6 +311,7 @@ async def health():
         "ok": True,
         "auto_download": _env_flag_enabled("GSV_TTS_AUTO_DOWNLOAD", False),
         "tts_loaded": _tts is not None,
+        "runtime": _runtime_status(),
         **_model_status(),
     }
 
