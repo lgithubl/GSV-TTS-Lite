@@ -132,7 +132,7 @@ pip install gsv-tts-lite==0.4.7
 
 本 fork 提供 `Build Web Docker Image` Action，可构建网页/API 镜像。默认构建 `ghcr.io/lgithubl/gsv-tts-lite:m40`，使用 CUDA 11.8 版 `torch/torchaudio 2.5.1`，并允许 Tesla M40 的 `sm_52` 设备参与推理。
 
-如果需要离线镜像包，在 GitHub `Actions` 页面运行 `Build Web Docker Image` 时设置 `export_artifact=true`。运行完成后，在该 run 的 `Artifacts` 下载 `gsv-tts-lite-web-m40`，解压后加载镜像：
+默认会同时推送 GHCR 镜像并导出离线镜像包。运行完成后，可在 run summary 看到镜像名，也可在该 run 的 `Artifacts` 下载 `gsv-tts-lite-web-m40`，解压后加载镜像：
 
 ```bash
 gzip -dc gsv-tts-lite-web-m40.tar.gz | docker load

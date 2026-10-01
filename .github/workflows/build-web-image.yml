@@ -32,7 +32,7 @@ on:
       export_artifact:
         description: Export image tar.gz artifact
         required: false
-        default: "false"
+        default: "true"
         type: choice
         options:
           - "true"
@@ -101,6 +101,25 @@ jobs:
           docker rm -f gsv-tts-web-smoke || true
           exit 1
 
+      - name: Write image summary
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## Docker image
+
+          Published image:
+
+          \`\`\`text
+          ${{ steps.image.outputs.image }}
+          \`\`\`
+
+          Pull it with:
+
+          \`\`\`bash
+          docker pull ${{ steps.image.outputs.image }}
+          \`\`\`
+          EOF
+
       - name: Export image tarball
         if: ${{ github.event_name == 'push' || inputs.export_artifact == 'true' }}
         shell: bash
@@ -117,7 +136,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Write local image usage summary
+      - name: Write local image artifact summary
         if: ${{ github.event_name == 'push' || inputs.export_artifact == 'true' }}
         shell: bash
         run: |
