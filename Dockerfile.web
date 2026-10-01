@@ -4,6 +4,11 @@ ARG TORCH_VERSION=2.5.1
 ARG TORCHAUDIO_VERSION=2.5.1
 ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu118
 
+LABEL ai.lgithubl.pytorch.version="${TORCH_VERSION}" \
+      ai.lgithubl.torchaudio.version="${TORCHAUDIO_VERSION}" \
+      ai.lgithubl.pytorch.index_url="${PYTORCH_INDEX_URL}" \
+      ai.lgithubl.m40.expected_compute_capability="5.2"
+
 ENV PYTHONUNBUFFERED=1 \
     PORT=8000 \
     MODELS_DIR=/models \

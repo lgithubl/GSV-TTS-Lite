@@ -67,9 +67,18 @@ jobs:
         run: |
           TAG="${{ inputs.tag }}"
           if [ -z "$TAG" ]; then TAG="web"; fi
+          TORCH_VERSION="${{ inputs.torch_version }}"
+          if [ -z "$TORCH_VERSION" ]; then TORCH_VERSION="2.5.1"; fi
+          TORCHAUDIO_VERSION="${{ inputs.torchaudio_version }}"
+          if [ -z "$TORCHAUDIO_VERSION" ]; then TORCHAUDIO_VERSION="2.5.1"; fi
+          PYTORCH_INDEX_URL="${{ inputs.pytorch_index_url }}"
+          if [ -z "$PYTORCH_INDEX_URL" ]; then PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cu118"; fi
           IMAGE="ghcr.io/${{ github.repository }}:${TAG}"
           echo "image=${IMAGE,,}" >> "$GITHUB_OUTPUT"
           echo "artifact_name=gsv-tts-lite-web-${TAG}" >> "$GITHUB_OUTPUT"
+          echo "torch_version=$TORCH_VERSION" >> "$GITHUB_OUTPUT"
+          echo "torchaudio_version=$TORCHAUDIO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "pytorch_index_url=$PYTORCH_INDEX_URL" >> "$GITHUB_OUTPUT"
 
       - name: Build and push image
         uses: docker/build-push-action@v6
@@ -79,13 +88,14 @@ jobs:
           push: true
           tags: ${{ steps.image.outputs.image }}
           build-args: |
-            TORCH_VERSION=${{ inputs.torch_version }}
-            TORCHAUDIO_VERSION=${{ inputs.torchaudio_version }}
-            PYTORCH_INDEX_URL=${{ inputs.pytorch_index_url }}
+            TORCH_VERSION=${{ steps.image.outputs.torch_version }}
+            TORCHAUDIO_VERSION=${{ steps.image.outputs.torchaudio_version }}
+            PYTORCH_INDEX_URL=${{ steps.image.outputs.pytorch_index_url }}
 
       - name: Smoke test pushed image
         shell: bash
         run: |
+          set -euxo pipefail
           docker pull "${{ steps.image.outputs.image }}"
           docker run -d --name gsv-tts-web-smoke -p 8000:8000 "${{ steps.image.outputs.image }}"
           for i in $(seq 1 90); do
@@ -100,6 +110,30 @@ jobs:
           docker logs gsv-tts-web-smoke || true
           docker rm -f gsv-tts-web-smoke || true
           exit 1
+
+      - name: Validate M40 image contract without GPU
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker image inspect "${{ steps.image.outputs.image }}" \
+            --format '{{ index .Config.Labels "ai.lgithubl.pytorch.index_url" }}' \
+            | grep -q '/cu118'
+          docker image inspect "${{ steps.image.outputs.image }}" \
+            --format '{{ index .Config.Labels "ai.lgithubl.m40.expected_compute_capability" }}' \
+            | grep -qx "5.2"
+          grep -R "sm_version < 5.2" gsv_tts/Config.py
+          docker run --rm --entrypoint python "${{ steps.image.outputs.image }}" - <<'PY'
+          import importlib.metadata
+          import torch
+
+          assert torch.__version__.startswith("${{ steps.image.outputs.torch_version }}"), torch.__version__
+          assert importlib.metadata.version("torchaudio").startswith("${{ steps.image.outputs.torchaudio_version }}")
+          assert torch.version.cuda is not None, "CPU-only torch wheel installed"
+          assert torch.version.cuda.startswith("11.8"), torch.version.cuda
+          assert torch.cuda.is_available() is False
+          print("torch", torch.__version__)
+          print("torch cuda", torch.version.cuda)
+          PY
 
       - name: Write image summary
         shell: bash
