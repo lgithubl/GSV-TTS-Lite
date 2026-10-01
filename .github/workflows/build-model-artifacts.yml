@@ -34,7 +34,7 @@ jobs:
       - name: Install model conversion tools
         if: ${{ inputs.package == 'all' || inputs.package == 'cpu' || inputs.package == 'gpu' }}
         run: |
-          python3 -m pip install --user --no-cache-dir numpy safetensors transformers
+          python3 -m pip install --user --no-cache-dir numpy safetensors "transformers==4.44.2"
           python3 -m pip install --user --no-cache-dir \
             --index-url https://download.pytorch.org/whl/cpu \
             "torch==2.6.0"
