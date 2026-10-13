@@ -29,6 +29,17 @@ OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="GSV-TTS-Lite Web", version="0.1.0")
 _tts = None
 _tts_lock = threading.Lock()
+# _tts_lock 只保护"第一次创建 _tts 这个单例对象"这一下，创建完就立刻释放了，
+# 真正跑推理的 tts.infer()/tts.infer_batched() 完全没有加锁保护。
+# asyncio.to_thread 会把每个请求的推理扔到线程池里不同的 OS 线程执行，两个
+# 请求同时到就是两个线程同时在用同一个 tts 对象做推理——底层 GPT-SoVITS
+# 引擎内部的共享状态（KV-cache、position 计数器之类）不是为并发重入设计的，
+# 两个线程同时读写会相互踩，表现成"张量形状对不上"之类的报错（比如
+# "index 512 is out of bounds for dimension 1 with size 512"）。
+# 用这把独立的锁把真正的推理调用整个串行化，不跟 _tts_lock 混用——
+# threading.Lock 不可重入，_get_tts() 内部已经拿了 _tts_lock，如果外层
+# 推理调用也用同一把锁包住 _get_tts()，同一线程二次拿锁会直接死锁。
+_infer_lock = threading.Lock()
 
 
 def _env_flag_enabled(name: str, default: bool = True) -> bool:
@@ -215,21 +226,22 @@ async def _synthesize_to_file(request: TTSRequest) -> Path:
         raise HTTPException(status_code=400, detail=f"prompt_audio not found: {prompt_audio}")
 
     def _run():
-        tts = _get_tts()
-        clip = tts.infer(
-            spk_audio_path=speaker_audio,
-            prompt_audio_path=prompt_audio,
-            prompt_audio_text=prompt_text,
-            text=request.text,
-            text_language=request.text_language,
-            prompt_language=request.prompt_language,
-            top_k=request.top_k,
-            top_p=request.top_p,
-            temperature=request.temperature,
-            repetition_penalty=request.repetition_penalty,
-            noise_scale=request.noise_scale,
-            speed=request.speed,
-        )
+        with _infer_lock:
+            tts = _get_tts()
+            clip = tts.infer(
+                spk_audio_path=speaker_audio,
+                prompt_audio_path=prompt_audio,
+                prompt_audio_text=prompt_text,
+                text=request.text,
+                text_language=request.text_language,
+                prompt_language=request.prompt_language,
+                top_k=request.top_k,
+                top_p=request.top_p,
+                temperature=request.temperature,
+                repetition_penalty=request.repetition_penalty,
+                noise_scale=request.noise_scale,
+                speed=request.speed,
+            )
         output = OUTPUTS_DIR / f"tts_{uuid.uuid4().hex}.wav"
         clip.save(str(output))
         return output
@@ -440,23 +452,24 @@ async def tts_batched(request: TTSBatchedRequest):
         raise HTTPException(status_code=400, detail=f"prompt_audio not found: {prompt_audio}")
 
     def _run():
-        tts = _get_tts()
-        clips = tts.infer_batched(
-            spk_audio_paths=speaker_audio,
-            prompt_audio_paths=prompt_audio,
-            prompt_audio_texts=prompt_text,
-            texts=request.texts,
-            return_subtitles=request.return_subtitles,
-            is_cut_text=request.is_cut_text,
-            cut_minlen=request.cut_minlen,
-            cut_mute=request.cut_mute,
-            top_k=request.top_k,
-            top_p=request.top_p,
-            temperature=request.temperature,
-            repetition_penalty=request.repetition_penalty,
-            noise_scale=request.noise_scale,
-            speed=request.speed,
-        )
+        with _infer_lock:
+            tts = _get_tts()
+            clips = tts.infer_batched(
+                spk_audio_paths=speaker_audio,
+                prompt_audio_paths=prompt_audio,
+                prompt_audio_texts=prompt_text,
+                texts=request.texts,
+                return_subtitles=request.return_subtitles,
+                is_cut_text=request.is_cut_text,
+                cut_minlen=request.cut_minlen,
+                cut_mute=request.cut_mute,
+                top_k=request.top_k,
+                top_p=request.top_p,
+                temperature=request.temperature,
+                repetition_penalty=request.repetition_penalty,
+                noise_scale=request.noise_scale,
+                speed=request.speed,
+            )
 
         filenames = []
         subtitles_list = []
