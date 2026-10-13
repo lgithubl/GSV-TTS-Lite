@@ -192,3 +192,31 @@ jobs:
           docker image inspect ${{ steps.image.outputs.image }}
           \`\`\`
           EOF
+
+      - name: Package app source
+        shell: bash
+        run: tar czf gsv-tts-lite-app-code.tar.gz docker gsv_tts
+
+      - name: Upload app source artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: gsv-tts-lite-app-code
+          path: gsv-tts-lite-app-code.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Write app source artifact summary
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## App source artifact
+
+          Download the artifact named \`gsv-tts-lite-app-code\` from this workflow run to get just the
+          \`docker/\` and \`gsv_tts/\` source (no image, no model weights) -- handy for bind-mounting over
+          an already-running container without rebuilding/pulling the full image:
+
+          \`\`\`bash
+          tar xzf gsv-tts-lite-app-code.tar.gz
+          docker run ... -v "\$PWD/docker:/app/docker:ro" -v "\$PWD/gsv_tts:/app/gsv_tts:ro" ...
+          \`\`\`
+          EOF

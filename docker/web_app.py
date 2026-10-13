@@ -139,6 +139,23 @@ class GSVIModelsRequest(BaseModel):
     version: str | None = None
 
 
+class TTSBatchedRequest(BaseModel):
+    texts: list[str] = Field(..., min_length=1)
+    speaker_audio: str | None = None
+    prompt_audio: str | None = None
+    prompt_text: str | None = None
+    is_cut_text: bool = True
+    cut_minlen: int = 10
+    cut_mute: float = 0.3
+    return_subtitles: bool = False
+    top_k: int = 15
+    top_p: float = 1.0
+    temperature: float = 1.0
+    repetition_penalty: float = 1.35
+    noise_scale: float = 0.5
+    speed: float = 1.0
+
+
 class GSVIInferRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=2000)
     text_lang: str | None = None
@@ -408,6 +425,67 @@ async def gsvi_infer_single(payload: GSVIInferRequest, request: Request):
         "msg": "success",
         "audio_url": str(request.url_for("audio", filename=output_path.name)),
     }
+
+
+@app.post("/tts/batched")
+async def tts_batched(request: TTSBatchedRequest):
+    speaker_audio = request.speaker_audio or DEFAULT_SPEAKER_AUDIO
+    prompt_audio = request.prompt_audio or DEFAULT_PROMPT_AUDIO
+    prompt_text = request.prompt_text if request.prompt_text else DEFAULT_PROMPT_TEXT
+    if not prompt_text:
+        raise HTTPException(status_code=400, detail="prompt_text is required unless DEFAULT_PROMPT_TEXT is set.")
+    if not Path(speaker_audio).exists():
+        raise HTTPException(status_code=400, detail=f"speaker_audio not found: {speaker_audio}")
+    if not Path(prompt_audio).exists():
+        raise HTTPException(status_code=400, detail=f"prompt_audio not found: {prompt_audio}")
+
+    def _run():
+        tts = _get_tts()
+        clips = tts.infer_batched(
+            spk_audio_paths=speaker_audio,
+            prompt_audio_paths=prompt_audio,
+            prompt_audio_texts=prompt_text,
+            texts=request.texts,
+            return_subtitles=request.return_subtitles,
+            is_cut_text=request.is_cut_text,
+            cut_minlen=request.cut_minlen,
+            cut_mute=request.cut_mute,
+            top_k=request.top_k,
+            top_p=request.top_p,
+            temperature=request.temperature,
+            repetition_penalty=request.repetition_penalty,
+            noise_scale=request.noise_scale,
+            speed=request.speed,
+        )
+
+        filenames = []
+        subtitles_list = []
+        for clip in clips:
+            filename = f"tts_{uuid.uuid4().hex}.wav"
+            clip.save(str(OUTPUTS_DIR / filename))
+            filenames.append(filename)
+            if request.return_subtitles:
+                subtitles_list.append(clip.subtitles)
+        return filenames, subtitles_list
+
+    try:
+        filenames, subtitles_list = await asyncio.to_thread(_run)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    result = {
+        "success": True,
+        "count": len(filenames),
+        "filenames": filenames,
+        "prompt_text_used": prompt_text,
+    }
+    if request.return_subtitles:
+        result["subtitles"] = subtitles_list
+    return result
 
 
 @app.get("/audio/{filename}")
