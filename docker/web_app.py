@@ -155,6 +155,10 @@ class TTSBatchedRequest(BaseModel):
     speaker_audio: str | None = None
     prompt_audio: str | None = None
     prompt_text: str | None = None
+    # 不传就落回 DEFAULT_TEXT_LANGUAGE / DEFAULT_PROMPT_LANGUAGE（默认 auto）；
+    # 取值同 /api/tts：auto / ja / zh / en，另外接受 _normalize_language 里的别名
+    text_language: str | None = None
+    prompt_language: str | None = None
     is_cut_text: bool = True
     cut_minlen: int = 10
     cut_mute: float = 0.3
@@ -444,6 +448,8 @@ async def tts_batched(request: TTSBatchedRequest):
     speaker_audio = request.speaker_audio or DEFAULT_SPEAKER_AUDIO
     prompt_audio = request.prompt_audio or DEFAULT_PROMPT_AUDIO
     prompt_text = request.prompt_text if request.prompt_text else DEFAULT_PROMPT_TEXT
+    text_language = _normalize_language(request.text_language, DEFAULT_TEXT_LANGUAGE)
+    prompt_language = _normalize_language(request.prompt_language, DEFAULT_PROMPT_LANGUAGE)
     if not prompt_text:
         raise HTTPException(status_code=400, detail="prompt_text is required unless DEFAULT_PROMPT_TEXT is set.")
     if not Path(speaker_audio).exists():
@@ -459,6 +465,8 @@ async def tts_batched(request: TTSBatchedRequest):
                 prompt_audio_paths=prompt_audio,
                 prompt_audio_texts=prompt_text,
                 texts=request.texts,
+                text_languages=text_language,
+                prompt_languages=prompt_language,
                 return_subtitles=request.return_subtitles,
                 is_cut_text=request.is_cut_text,
                 cut_minlen=request.cut_minlen,
@@ -495,6 +503,8 @@ async def tts_batched(request: TTSBatchedRequest):
         "count": len(filenames),
         "filenames": filenames,
         "prompt_text_used": prompt_text,
+        "text_language_used": text_language,
+        "prompt_language_used": prompt_language,
     }
     if request.return_subtitles:
         result["subtitles"] = subtitles_list
