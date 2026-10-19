@@ -13,9 +13,12 @@ Projects:
 https://github.com/juntaosun/LangSegment
 """
 
+import logging
 import re
 from collections import defaultdict
 import py3langid as langid
+
+logger = logging.getLogger(__name__)
 
 
 class LangSegment():
@@ -28,6 +31,13 @@ class LangSegment():
     SYMBOLS_PATTERN = r'(<([a-zA-Z|-]*)>(.*?)<\/*[a-zA-Z|-]*>)'
     
     Langfilters = ["zh", "en", "ja", "ko"]
+
+    # 检测器给出的语言码 -> 实际采用的语言码。默认为空，不改变任何行为。
+    # py3langid 会把一部分只含汉字的句子判成 wuu（吴语）、yue（粤语）等，而 Langfilters 只保留
+    # zh/en/ja/ko，判成别的码的文本会被丢弃：整句丢失时报 "no valid segments"，只丢一部分时
+    # 音频悄悄少读一段。用 set_lang_map({"wuu": "zh", "yue": "zh"}) 把这类码映射回支持的语言。
+    LangMap = {}
+    LangMapTargets = ("zh", "ja", "en", "ko")
 
     PARSE_TAG = re.compile(r'(⑥\$\d+[\d]{6,}⑥)')
     
@@ -94,6 +104,11 @@ class LangSegment():
             language in filters or language in filters[0] or \
             filters[0] == "*" or filters[0] in "alls-mixs-autos":
             words.append(data)
+        else:
+            # 被丢弃的文本不会出现在任何后续结果里，音频里就是少了这一段；留一行日志，
+            # 看到新的语言码就可以按需加进 LangMap
+            logger.warning("LangSegment dropped text (detected language %r is not in %s, add it to the lang map to keep it): %r",
+                           language, filters, text)
         return data
 
     @staticmethod
@@ -139,16 +154,38 @@ class LangSegment():
         return cleans_text
     
     @staticmethod
+    def set_lang_map(mapping):
+        """设置语言码映射，如 {"wuu": "zh", "yue": "zh"}；传空/None 清空。
+        目标必须是 zh/ja/en/ko，否则抛 ValueError（不改动现有映射）。"""
+        new_map = {}
+        for source, target in (mapping or {}).items():
+            source = str(source).strip().lower()
+            target = str(target).strip().lower()
+            if not source:
+                raise ValueError("lang map: empty source language code")
+            if target not in LangSegment.LangMapTargets:
+                raise ValueError(f"lang map: {source!r} -> {target!r}, target must be one of {LangSegment.LangMapTargets}")
+            new_map[source] = target
+        LangSegment.LangMap = new_map
+        # getTexts 会缓存"上一次文本"的结果，映射变了必须作废，否则同一句话还是旧结果
+        LangSegment._text_lasts = None
+        LangSegment._text_langs = None
+
+    @staticmethod
+    def _apply_lang_map(language):
+        return LangSegment.LangMap.get(language, language) if language else language
+
+    @staticmethod
     def _lang_classify(cleans_text):
         language, *_ = langid.classify(cleans_text)
-        return language
+        return LangSegment._apply_lang_map(language)
 
     @staticmethod
     def _lang_classify_full(text):
         if not text or not text.strip():
             return None
         language, *_ = langid.classify(text)
-        return language
+        return LangSegment._apply_lang_map(language)
     
     @staticmethod
     def _parse_language(words , segment):

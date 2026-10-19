@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import re
 import threading
 import uuid
 from pathlib import Path
@@ -47,6 +49,26 @@ def _env_flag_enabled(name: str, default: bool = True) -> bool:
     if value is None:
         return default
     return value.strip().lower() not in ("0", "false", "no", "off")
+
+
+logger = logging.getLogger("gsv_web")
+
+
+def _parse_lang_map(raw: str) -> tuple[dict[str, str], list[str]]:
+    """解析 GSV_TTS_LANG_MAP，格式 "wuu=zh,yue=zh"（条目用 , ; 或空白分隔，键值用 = 或 :，等号两边的空格忽略）。
+    返回 (有效映射, 被忽略的条目)。目标只允许 zh/ja/en/ko，其余忽略而不是让服务起不来。"""
+    mapping: dict[str, str] = {}
+    ignored: list[str] = []
+    for item in re.split(r"[,;\s]+", re.sub(r"\s*([=:])\s*", r"\1", raw or "")):
+        if not item:
+            continue
+        key, sep, value = re.split(r"([=:])", item, maxsplit=1) if re.search(r"[=:]", item) else (item, "", "")
+        key, value = key.strip().lower(), value.strip().lower()
+        if not sep or not key or value not in ("zh", "ja", "en", "ko"):
+            ignored.append(item)
+            continue
+        mapping[key] = value
+    return mapping, ignored
 
 
 def _model_status() -> dict:
@@ -116,6 +138,16 @@ def _get_tts():
                 "Unable to import gsv_tts. Install runtime dependencies such as torch "
                 "or use an image variant that includes them."
             ) from exc
+
+        # 语言检测把汉字句子判成 wuu/yue 等会导致整句或半句被丢弃；默认不映射，配了才生效，
+        # 例如 GSV_TTS_LANG_MAP="wuu=zh,yue=zh"
+        lang_map, ignored = _parse_lang_map(os.environ.get("GSV_TTS_LANG_MAP", ""))
+        for item in ignored:
+            logger.warning("GSV_TTS_LANG_MAP: ignoring invalid entry %r (expected code=zh|ja|en|ko)", item)
+        if lang_map:
+            from gsv_tts.LangSegment import LangSegment
+            LangSegment.set_lang_map(lang_map)
+            logger.warning("GSV_TTS_LANG_MAP active: %s", lang_map)
 
         auto_download = _env_flag_enabled("GSV_TTS_AUTO_DOWNLOAD", False)
         tts = TTS(
