@@ -177,6 +177,20 @@ mkdir -p outputs
 bash run-docker.sh
 ```
 
+#### 多语音 / 按请求选模型
+
+在 `/models/voices.json`（可用 `GSV_TTS_VOICES_FILE` 改路径）里为每个语音绑定 GPT `.ckpt`、SoVITS `.pth`、参考音频和参考文本，格式见 `docker/voices.example.json`。模型路径相对 `/models`，参考音频路径相对 `/refs`；文件修改后下次请求自动生效。
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/tts -H 'Content-Type: application/json' \
+  -d '{"text":"你好","voice":"alice"}' -o out.wav
+```
+
+- `voice` 可用于 `POST /api/tts`、`GET /tts`、`POST /tts/batched`；GSVI 的 `/infer_single` 用 `model_name`。`GET /api/voices` 列出语音和已加载模型。
+- 优先级：请求里显式传的字段 > `voice` 配置 > `DEFAULT_*` 环境变量 > 默认底模。不传 `voice` 行为与之前一致。
+- `GSV_TTS_MAX_LOADED_MODELS`（默认 3）：GPT、SoVITS 各自最多驻留几个，超出按最久未使用卸载；`preload: true` 的语音在首次请求时预加载。
+- `GSV_TTS_ALLOW_MODEL_PATHS=1` 才允许请求直接传 `gpt_model` / `sovits_model`（只能是 `/models` 内的路径），默认关闭。
+
 #### LunaTranslator 对接
 
 Docker Web 服务同时提供 GPT-SoVITS / GSVI 兼容接口，可在 LunaTranslator 中直接选择内置 `GPT-SoVITS`。

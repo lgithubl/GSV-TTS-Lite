@@ -1,0 +1,22 @@
+{
+  "alice": {
+    "gpt_model": "voices/alice/alice-e15.ckpt",
+    "sovits_model": "voices/alice/alice_e8_s200.pth",
+    "speaker_audio": "alice/ref.wav",
+    "prompt_audio": "alice/ref.wav",
+    "prompt_text": "参考音频里实际说的话。",
+    "prompt_language": "zh",
+    "preload": true
+  },
+  "bob": {
+    "gpt_model": "voices/bob/bob-e15.ckpt",
+    "sovits_model": "voices/bob/bob_e8_s200.pth",
+    "prompt_audio": "bob/ref.wav",
+    "prompt_text": "こんにちは、よろしくお願いします。",
+    "prompt_language": "ja"
+  },
+  "zero-shot-carol": {
+    "speaker_audio": "carol/ref.wav",
+    "prompt_text": "只换参考音频、不配模型时用默认底模。"
+  }
+}

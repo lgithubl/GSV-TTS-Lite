@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import threading
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Literal
 
@@ -52,6 +54,161 @@ def _env_flag_enabled(name: str, default: bool = True) -> bool:
 
 
 logger = logging.getLogger("gsv_web")
+
+# ---- 按请求选模型 ----
+# voices.json: {"alice": {"gpt_model": "voices/alice.ckpt", "sovits_model": "voices/alice.pth",
+#               "speaker_audio": "alice.wav", "prompt_audio": "alice.wav", "prompt_text": "...",
+#               "prompt_language": "zh", "preload": true}}
+# 模型相对路径基于 MODELS_DIR，参考音频相对路径基于 REFS_DIR。文件改动后下次请求自动重新读取。
+VOICES_FILE = Path(os.environ.get("GSV_TTS_VOICES_FILE", str(MODELS_DIR / "voices.json")))
+# 是否允许请求直接传 gpt_model / sovits_model 路径（只能指向 MODELS_DIR 内部）。
+# .ckpt/.pth 用 pickle 加载，放开等于允许加载任意文件，默认关闭，只允许用 voice。
+ALLOW_MODEL_PATHS = _env_flag_enabled("GSV_TTS_ALLOW_MODEL_PATHS", False)
+# GPT、SoVITS 各自最多同时驻留几个模型，超出按最久未使用卸载。<=0 表示不限制。
+MAX_LOADED_MODELS = int(os.environ.get("GSV_TTS_MAX_LOADED_MODELS", "3"))
+
+_voices_cache: dict = {"mtime": None, "voices": {}}
+_model_lru: dict[str, OrderedDict] = {"gpt": OrderedDict(), "sovits": OrderedDict()}
+
+
+def _model_key(path: str | Path) -> str:
+    return str(Path(path).resolve())
+
+
+def _default_gpt_key() -> str:
+    return _model_key(MODELS_DIR / "s1v3.ckpt")
+
+
+def _default_sovits_key() -> str:
+    return _model_key(MODELS_DIR / "s2Gv2ProPlus.pth")
+
+
+def _load_voices() -> dict[str, dict]:
+    try:
+        mtime = VOICES_FILE.stat().st_mtime
+    except FileNotFoundError:
+        _voices_cache.update(mtime=None, voices={})
+        return {}
+    if _voices_cache["mtime"] != mtime:
+        try:
+            data = json.loads(VOICES_FILE.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"invalid voices file {VOICES_FILE}: {exc}") from exc
+        if not isinstance(data, dict) or not all(isinstance(v, dict) for v in data.values()):
+            raise HTTPException(status_code=500, detail=f"voices file {VOICES_FILE} must be an object of objects")
+        _voices_cache.update(mtime=mtime, voices=data)
+    return _voices_cache["voices"]
+
+
+def _config_path(base: Path, value: str) -> str:
+    """voices.json 里的路径：相对路径基于 base，绝对路径原样使用（配置文件是可信的）。"""
+    path = Path(value)
+    return str(path if path.is_absolute() else base / path)
+
+
+def _request_model_path(value: str, field: str) -> str:
+    """请求里直接传的模型路径：必须开启开关，且解析后必须在 MODELS_DIR 内。"""
+    if not ALLOW_MODEL_PATHS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} is disabled; use 'voice' or set GSV_TTS_ALLOW_MODEL_PATHS=1",
+        )
+    path = Path(value)
+    if not path.is_absolute():
+        path = MODELS_DIR / path
+    path = path.resolve()
+    if not path.is_relative_to(MODELS_DIR.resolve()):
+        raise HTTPException(status_code=400, detail=f"{field} must be inside {MODELS_DIR}")
+    return str(path)
+
+
+def _resolve_synthesis(
+    voice: str | None,
+    gpt_model: str | None,
+    sovits_model: str | None,
+    speaker_audio: str | None,
+    prompt_audio: str | None,
+    prompt_text: str | None,
+    text_language: str | None,
+    prompt_language: str | None,
+) -> dict:
+    """优先级：请求显式字段 > voice 配置 > DEFAULT_* 环境变量 > 默认底模。"""
+    cfg: dict = {}
+    if voice and voice != GSVI_MODEL_NAME:
+        voices = _load_voices()
+        if voice not in voices:
+            raise HTTPException(status_code=404, detail=f"voice not found: {voice}")
+        cfg = voices[voice]
+
+    if gpt_model:
+        gpt_key = _request_model_path(gpt_model, "gpt_model")
+    elif cfg.get("gpt_model"):
+        gpt_key = _config_path(MODELS_DIR, cfg["gpt_model"])
+    else:
+        gpt_key = _default_gpt_key()
+    if sovits_model:
+        sovits_key = _request_model_path(sovits_model, "sovits_model")
+    elif cfg.get("sovits_model"):
+        sovits_key = _config_path(MODELS_DIR, cfg["sovits_model"])
+    else:
+        sovits_key = _default_sovits_key()
+    gpt_key, sovits_key = _model_key(gpt_key), _model_key(sovits_key)
+
+    cfg_speaker = _config_path(REFS_DIR, cfg["speaker_audio"]) if cfg.get("speaker_audio") else None
+    cfg_prompt = _config_path(REFS_DIR, cfg["prompt_audio"]) if cfg.get("prompt_audio") else None
+    # voice 只配了一个参考音频时，两者共用
+    speaker_audio = speaker_audio or cfg_speaker or cfg_prompt or DEFAULT_SPEAKER_AUDIO
+    prompt_audio = prompt_audio or cfg_prompt or cfg_speaker or DEFAULT_PROMPT_AUDIO
+    prompt_text = prompt_text or cfg.get("prompt_text") or DEFAULT_PROMPT_TEXT
+    text_language = _normalize_language(text_language or cfg.get("text_language"), DEFAULT_TEXT_LANGUAGE)
+    prompt_language = _normalize_language(prompt_language or cfg.get("prompt_language"), DEFAULT_PROMPT_LANGUAGE)
+
+    if not prompt_text:
+        raise HTTPException(status_code=400, detail="prompt_text is required unless the voice or DEFAULT_PROMPT_TEXT sets it.")
+    for name, path in (("gpt_model", gpt_key), ("sovits_model", sovits_key),
+                       ("speaker_audio", speaker_audio), ("prompt_audio", prompt_audio)):
+        if not Path(path).exists():
+            raise HTTPException(status_code=400, detail=f"{name} not found: {path}")
+
+    return {
+        "voice": voice or None,
+        "gpt_model": gpt_key,
+        "sovits_model": sovits_key,
+        "speaker_audio": speaker_audio,
+        "prompt_audio": prompt_audio,
+        "prompt_text": prompt_text,
+        "text_language": text_language,
+        "prompt_language": prompt_language,
+    }
+
+
+def _ensure_model(tts, kind: str, key: str):
+    """必须在 _infer_lock 内调用：保证模型已加载，必要时按 LRU 卸载其它模型。"""
+    loaded = tts.gpt_models if kind == "gpt" else tts.sovits_models
+    lru = _model_lru[kind]
+    if key not in loaded:
+        if MAX_LOADED_MODELS > 0:
+            while len(loaded) >= MAX_LOADED_MODELS:
+                victim = next((k for k in lru if k in loaded), None) or next(iter(loaded))
+                logger.warning("unloading %s model (LRU): %s", kind, victim)
+                if kind == "gpt":
+                    tts.unload_gpt_model(victim)
+                else:
+                    tts.unload_sovits_model(victim)
+                lru.pop(victim, None)
+        logger.warning("loading %s model: %s", kind, key)
+        if kind == "gpt":
+            tts.load_gpt_model(key)
+        else:
+            tts.load_sovits_model(key)
+    lru[key] = None
+    lru.move_to_end(key)
+
+
+def _loaded_models() -> dict:
+    if _tts is None:
+        return {"gpt": [], "sovits": []}
+    return {"gpt": list(_tts.gpt_models.keys()), "sovits": list(_tts.sovits_models.keys())}
 
 
 def _parse_lang_map(raw: str) -> tuple[dict[str, str], list[str]]:
@@ -157,19 +314,35 @@ def _get_tts():
             use_flash_attn=_env_flag_enabled("GSV_TTS_USE_FLASH_ATTN", False),
         )
         if _env_flag_enabled("GSV_TTS_LOAD_DEFAULT_WEIGHTS", True):
-            tts.load_gpt_model()
-            tts.load_sovits_model()
+            # 用规范化后的路径做键，后续请求按同样的键查找，避免同一模型被加载两份
+            _ensure_model(tts, "gpt", _default_gpt_key())
+            _ensure_model(tts, "sovits", _default_sovits_key())
+        try:
+            for name, cfg in _load_voices().items():
+                if not cfg.get("preload"):
+                    continue
+                if cfg.get("gpt_model"):
+                    _ensure_model(tts, "gpt", _model_key(_config_path(MODELS_DIR, cfg["gpt_model"])))
+                if cfg.get("sovits_model"):
+                    _ensure_model(tts, "sovits", _model_key(_config_path(MODELS_DIR, cfg["sovits_model"])))
+                logger.warning("preloaded voice: %s", name)
+        except Exception:
+            logger.exception("voice preload failed; continuing with lazy loading")
         _tts = tts
         return _tts
 
 
 class TTSRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=2000)
+    voice: str | None = None
+    gpt_model: str | None = None
+    sovits_model: str | None = None
     speaker_audio: str | None = None
     prompt_audio: str | None = None
     prompt_text: str | None = None
-    text_language: Literal["auto", "ja", "zh", "en"] = "auto"
-    prompt_language: Literal["auto", "ja", "zh", "en"] = "auto"
+    # 不传则依次取 voice 配置、DEFAULT_TEXT_LANGUAGE / DEFAULT_PROMPT_LANGUAGE
+    text_language: str | None = None
+    prompt_language: str | None = None
     top_k: int = 15
     top_p: float = 1.0
     temperature: float = 1.0
@@ -184,6 +357,9 @@ class GSVIModelsRequest(BaseModel):
 
 class TTSBatchedRequest(BaseModel):
     texts: list[str] = Field(..., min_length=1)
+    voice: str | None = None
+    gpt_model: str | None = None
+    sovits_model: str | None = None
     speaker_audio: str | None = None
     prompt_audio: str | None = None
     prompt_text: str | None = None
@@ -205,6 +381,7 @@ class TTSBatchedRequest(BaseModel):
 
 class GSVIInferRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=2000)
+    model_name: str | None = None
     text_lang: str | None = None
     prompt_text_lang: str | None = None
     top_k: int = 15
@@ -251,32 +428,32 @@ def _normalize_language(value: str | None, default: str = "auto") -> Literal["au
 
 
 async def _synthesize_to_file(request: TTSRequest) -> Path:
-    speaker_audio = request.speaker_audio or DEFAULT_SPEAKER_AUDIO
-    prompt_audio = request.prompt_audio or DEFAULT_PROMPT_AUDIO
-    prompt_text = request.prompt_text if request.prompt_text else DEFAULT_PROMPT_TEXT
-    if not prompt_text:
-        raise HTTPException(status_code=400, detail="prompt_text is required unless DEFAULT_PROMPT_TEXT is set.")
-    if not Path(speaker_audio).exists():
-        raise HTTPException(status_code=400, detail=f"speaker_audio not found: {speaker_audio}")
-    if not Path(prompt_audio).exists():
-        raise HTTPException(status_code=400, detail=f"prompt_audio not found: {prompt_audio}")
+    r = _resolve_synthesis(
+        request.voice, request.gpt_model, request.sovits_model,
+        request.speaker_audio, request.prompt_audio, request.prompt_text,
+        request.text_language, request.prompt_language,
+    )
 
     def _run():
         with _infer_lock:
             tts = _get_tts()
+            _ensure_model(tts, "gpt", r["gpt_model"])
+            _ensure_model(tts, "sovits", r["sovits_model"])
             clip = tts.infer(
-                spk_audio_path=speaker_audio,
-                prompt_audio_path=prompt_audio,
-                prompt_audio_text=prompt_text,
+                spk_audio_path=r["speaker_audio"],
+                prompt_audio_path=r["prompt_audio"],
+                prompt_audio_text=r["prompt_text"],
                 text=request.text,
-                text_language=request.text_language,
-                prompt_language=request.prompt_language,
+                text_language=r["text_language"],
+                prompt_language=r["prompt_language"],
                 top_k=request.top_k,
                 top_p=request.top_p,
                 temperature=request.temperature,
                 repetition_penalty=request.repetition_penalty,
                 noise_scale=request.noise_scale,
                 speed=request.speed,
+                gpt_model=r["gpt_model"],
+                sovits_model=r["sovits_model"],
             )
         output = OUTPUTS_DIR / f"tts_{uuid.uuid4().hex}.wav"
         clip.save(str(output))
@@ -284,6 +461,8 @@ async def _synthesize_to_file(request: TTSRequest) -> Path:
 
     try:
         return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
@@ -315,10 +494,13 @@ INDEX_HTML = """<!doctype html>
   <form id="form">
     <label>Text</label>
     <textarea id="text" required>こんにちは、これは音声合成のテストです。</textarea>
-    <label>Speaker audio path</label>
-    <input id="speaker" value="/refs/speaker.wav" />
-    <label>Prompt audio path</label>
-    <input id="prompt" value="/refs/prompt.wav" />
+    <label>Voice (optional, from voices.json)</label>
+    <input id="voice" list="voices" placeholder="empty = default" />
+    <datalist id="voices"></datalist>
+    <label>Speaker audio path (optional override)</label>
+    <input id="speaker" placeholder="/refs/speaker.wav" />
+    <label>Prompt audio path (optional override)</label>
+    <input id="prompt" placeholder="/refs/prompt.wav" />
     <label>Prompt text</label>
     <input id="promptText" placeholder="Text spoken in the prompt audio" />
     <button id="submit">Generate</button>
@@ -340,12 +522,13 @@ form.addEventListener("submit", async (event) => {
     const res = await fetch("/api/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(Object.fromEntries(Object.entries({
         text: document.getElementById("text").value,
+        voice: document.getElementById("voice").value,
         speaker_audio: document.getElementById("speaker").value,
         prompt_audio: document.getElementById("prompt").value,
         prompt_text: document.getElementById("promptText").value
-      })
+      }).filter(([, v]) => v)))
     });
     if (!res.ok) throw new Error(await res.text());
     const blob = await res.blob();
@@ -358,6 +541,10 @@ form.addEventListener("submit", async (event) => {
     submit.disabled = false;
   }
 });
+fetch("/api/voices").then(r => r.json()).then(j => {
+  const list = document.getElementById("voices");
+  Object.keys(j.voices || {}).forEach(name => { const o = document.createElement("option"); o.value = name; list.appendChild(o); });
+}).catch(() => {});
 fetch("/health").then(r => r.json()).then(j => { statusEl.textContent = JSON.stringify(j, null, 2); });
 </script>
 </body>
@@ -376,6 +563,10 @@ async def health():
         "ok": True,
         "auto_download": _env_flag_enabled("GSV_TTS_AUTO_DOWNLOAD", False),
         "tts_loaded": _tts is not None,
+        "loaded_models": _loaded_models(),
+        "max_loaded_models": MAX_LOADED_MODELS,
+        "allow_model_paths": ALLOW_MODEL_PATHS,
+        "voices_file": str(VOICES_FILE),
         "runtime": _runtime_status(),
         **_model_status(),
     }
@@ -387,9 +578,31 @@ async def synthesize(request: TTSRequest):
     return FileResponse(output_path, media_type="audio/wav", filename=output_path.name)
 
 
+@app.get("/api/voices")
+async def list_voices():
+    loaded = _loaded_models()
+    voices = {}
+    for name, cfg in _load_voices().items():
+        gpt = _model_key(_config_path(MODELS_DIR, cfg["gpt_model"])) if cfg.get("gpt_model") else _default_gpt_key()
+        sovits = _model_key(_config_path(MODELS_DIR, cfg["sovits_model"])) if cfg.get("sovits_model") else _default_sovits_key()
+        voices[name] = {
+            "gpt_model": gpt,
+            "sovits_model": sovits,
+            "speaker_audio": cfg.get("speaker_audio"),
+            "prompt_audio": cfg.get("prompt_audio"),
+            "prompt_language": cfg.get("prompt_language"),
+            "preload": bool(cfg.get("preload")),
+            "loaded": gpt in loaded["gpt"] and sovits in loaded["sovits"],
+        }
+    return {"voices_file": str(VOICES_FILE), "voices": voices, "loaded_models": loaded}
+
+
 @app.get("/tts")
 async def synthesize_gptsovits_compatible(
     text: str,
+    voice: str | None = None,
+    gpt_model: str | None = None,
+    sovits_model: str | None = None,
     text_language: str | None = None,
     text_lang: str | None = None,
     prompt_language: str | None = None,
@@ -409,11 +622,14 @@ async def synthesize_gptsovits_compatible(
     ref_audio = ref_audio_path or prompt_audio
     request = TTSRequest(
         text=text,
+        voice=voice,
+        gpt_model=gpt_model,
+        sovits_model=sovits_model,
         speaker_audio=speaker_audio or ref_audio,
         prompt_audio=ref_audio,
         prompt_text=prompt_text,
-        text_language=_normalize_language(text_language or text_lang, DEFAULT_TEXT_LANGUAGE),
-        prompt_language=_normalize_language(prompt_language or prompt_lang, DEFAULT_PROMPT_LANGUAGE),
+        text_language=text_language or text_lang,
+        prompt_language=prompt_language or prompt_lang,
         top_k=top_k,
         top_p=top_p,
         temperature=temperature,
@@ -426,16 +642,20 @@ async def synthesize_gptsovits_compatible(
 
 
 def _gsvi_models_payload(version: str | None = None) -> dict:
-    return {
-        "version": version or GSVI_VERSION,
-        "models": {
-            GSVI_MODEL_NAME: {
-                "speaker_audio": DEFAULT_SPEAKER_AUDIO,
-                "prompt_audio": DEFAULT_PROMPT_AUDIO,
-                "prompt_language": DEFAULT_PROMPT_LANGUAGE,
-            }
-        },
+    models = {
+        GSVI_MODEL_NAME: {
+            "speaker_audio": DEFAULT_SPEAKER_AUDIO,
+            "prompt_audio": DEFAULT_PROMPT_AUDIO,
+            "prompt_language": DEFAULT_PROMPT_LANGUAGE,
+        }
     }
+    for name, cfg in _load_voices().items():
+        models[name] = {
+            "speaker_audio": cfg.get("speaker_audio") or cfg.get("prompt_audio"),
+            "prompt_audio": cfg.get("prompt_audio") or cfg.get("speaker_audio"),
+            "prompt_language": cfg.get("prompt_language") or DEFAULT_PROMPT_LANGUAGE,
+        }
+    return {"version": version or GSVI_VERSION, "models": models}
 
 
 @app.get("/version")
@@ -458,8 +678,8 @@ async def gsvi_models_for_version(version: str):
 async def gsvi_infer_single(payload: GSVIInferRequest, request: Request):
     tts_request = TTSRequest(
         text=payload.text,
-        text_language=_normalize_language(payload.text_lang, DEFAULT_TEXT_LANGUAGE),
-        prompt_language=_normalize_language(None, DEFAULT_PROMPT_LANGUAGE),
+        voice=payload.model_name,
+        text_language=payload.text_lang,
         top_k=payload.top_k,
         top_p=payload.top_p,
         temperature=payload.temperature,
@@ -477,21 +697,19 @@ async def gsvi_infer_single(payload: GSVIInferRequest, request: Request):
 
 @app.post("/tts/batched")
 async def tts_batched(request: TTSBatchedRequest):
-    speaker_audio = request.speaker_audio or DEFAULT_SPEAKER_AUDIO
-    prompt_audio = request.prompt_audio or DEFAULT_PROMPT_AUDIO
-    prompt_text = request.prompt_text if request.prompt_text else DEFAULT_PROMPT_TEXT
-    text_language = _normalize_language(request.text_language, DEFAULT_TEXT_LANGUAGE)
-    prompt_language = _normalize_language(request.prompt_language, DEFAULT_PROMPT_LANGUAGE)
-    if not prompt_text:
-        raise HTTPException(status_code=400, detail="prompt_text is required unless DEFAULT_PROMPT_TEXT is set.")
-    if not Path(speaker_audio).exists():
-        raise HTTPException(status_code=400, detail=f"speaker_audio not found: {speaker_audio}")
-    if not Path(prompt_audio).exists():
-        raise HTTPException(status_code=400, detail=f"prompt_audio not found: {prompt_audio}")
+    r = _resolve_synthesis(
+        request.voice, request.gpt_model, request.sovits_model,
+        request.speaker_audio, request.prompt_audio, request.prompt_text,
+        request.text_language, request.prompt_language,
+    )
+    speaker_audio, prompt_audio, prompt_text = r["speaker_audio"], r["prompt_audio"], r["prompt_text"]
+    text_language, prompt_language = r["text_language"], r["prompt_language"]
 
     def _run():
         with _infer_lock:
             tts = _get_tts()
+            _ensure_model(tts, "gpt", r["gpt_model"])
+            _ensure_model(tts, "sovits", r["sovits_model"])
             clips = tts.infer_batched(
                 spk_audio_paths=speaker_audio,
                 prompt_audio_paths=prompt_audio,
@@ -509,6 +727,8 @@ async def tts_batched(request: TTSBatchedRequest):
                 repetition_penalty=request.repetition_penalty,
                 noise_scale=request.noise_scale,
                 speed=request.speed,
+                gpt_model=r["gpt_model"],
+                sovits_model=r["sovits_model"],
             )
 
         filenames = []
@@ -537,6 +757,9 @@ async def tts_batched(request: TTSBatchedRequest):
         "prompt_text_used": prompt_text,
         "text_language_used": text_language,
         "prompt_language_used": prompt_language,
+        "voice_used": r["voice"],
+        "gpt_model_used": r["gpt_model"],
+        "sovits_model_used": r["sovits_model"],
     }
     if request.return_subtitles:
         result["subtitles"] = subtitles_list

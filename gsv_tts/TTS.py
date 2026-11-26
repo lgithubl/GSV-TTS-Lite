@@ -258,7 +258,7 @@ class TTS:
             logging.info(f"Using SoVITS model: {sovits_model}")
 
             sovits, ge = self._prepare_sovits_resources(sovits_model, spk_audio_path)
-            gpt, prompt, phones1, bert1 = self._prepare_gpt_resources(gpt_model, prompt_audio_path, prompt_audio_text, prompt_language)
+            gpt, prompt, phones1, bert1 = self._prepare_gpt_resources(gpt_model, prompt_audio_path, prompt_audio_text, prompt_language, sovits_model)
             t2s_model = gpt.t2s_model
             vq_model = sovits.vq_model
 
@@ -420,7 +420,7 @@ class TTS:
             logging.info(f"Using SoVITS model: {sovits_model}")
 
             sovits, ge = self._prepare_sovits_resources(sovits_model, spk_audio_path)
-            gpt, prompt, phones1, bert1 = self._prepare_gpt_resources(gpt_model, prompt_audio_path, prompt_audio_text, prompt_language)
+            gpt, prompt, phones1, bert1 = self._prepare_gpt_resources(gpt_model, prompt_audio_path, prompt_audio_text, prompt_language, sovits_model)
             t2s_model = gpt.t2s_model
             vq_model = sovits.vq_model
 
@@ -706,12 +706,7 @@ class TTS:
         
                 (spk_audio_path, prompt_audio_path, prompt_audio_text, phones2, bert2, prompt_language) = items
 
-                if prompt_audio_path not in self.prompt_audio_cache:
-                    self.cache_prompt_audio(prompt_audio_paths=prompt_audio_path, prompt_audio_texts=prompt_audio_text, prompt_language=prompt_language)
-
-                prompt = self.prompt_audio_cache[prompt_audio_path]["prompt"]
-                phones1 = self.prompt_audio_cache[prompt_audio_path]["phones1"]
-                bert1 = self.prompt_audio_cache[prompt_audio_path]["bert1"]
+                prompt, phones1, bert1 = self._get_prompt_cache(prompt_audio_path, prompt_audio_text, prompt_language, sovits_model)
             
                 if isinstance(spk_audio_path, dict):
                     weight_sum = sum(spk_audio_path.values())
@@ -1223,20 +1218,36 @@ class TTS:
         else:
             return await loop.run_in_executor(executor, _infer_batched_with_lock)
     
-    def _prepare_gpt_resources(self, gpt_model, prompt_audio_path, prompt_audio_text, prompt_language):
+    def _prepare_gpt_resources(self, gpt_model, prompt_audio_path, prompt_audio_text, prompt_language, sovits_model=None):
         if gpt_model not in self.gpt_models:
             self.load_gpt_model(gpt_model)
 
-        if prompt_audio_path not in self.prompt_audio_cache:
-            self.cache_prompt_audio(prompt_audio_paths=prompt_audio_path, prompt_audio_texts=prompt_audio_text, prompt_language=prompt_language)
-
-        prompt = self.prompt_audio_cache[prompt_audio_path]["prompt"]
-        phones1 = self.prompt_audio_cache[prompt_audio_path]["phones1"]
-        bert1 = self.prompt_audio_cache[prompt_audio_path]["bert1"]
+        prompt, phones1, bert1 = self._get_prompt_cache(prompt_audio_path, prompt_audio_text, prompt_language, sovits_model)
 
         gpt = self.gpt_models[gpt_model]
 
         return gpt, prompt, phones1, bert1
+
+    def _get_prompt_cache(self, prompt_audio_path, prompt_audio_text, prompt_language, sovits_model=None):
+        # prompt 语义 token 由 SoVITS 的量化器提取，不同 SoVITS 模型结果可能不同，所以按模型分别缓存；
+        # phones1/bert1 只跟参考文本和语言有关，文本或语言变了要重算。
+        if sovits_model is None:
+            sovits_model = next(iter(self.sovits_models))
+        entry = self.prompt_audio_cache.get(prompt_audio_path)
+        if (
+            entry is None
+            or entry.get("text") != prompt_audio_text
+            or entry.get("language") != prompt_language
+            or sovits_model not in entry["prompt"]
+        ):
+            self.cache_prompt_audio(
+                prompt_audio_paths=prompt_audio_path,
+                prompt_audio_texts=prompt_audio_text,
+                prompt_language=prompt_language,
+                sovits_model=sovits_model,
+            )
+            entry = self.prompt_audio_cache[prompt_audio_path]
+        return entry["prompt"][sovits_model], entry["phones1"], entry["bert1"]
     
     def _prepare_sovits_resources(self, sovits_model, spk_audio_path):
         if sovits_model not in self.sovits_models:
@@ -1380,6 +1391,8 @@ class TTS:
                     for audio in self.spk_audio_cache.values():
                         if model_path in audio["ge"]:
                             del audio["ge"][model_path]
+                    for entry in self.prompt_audio_cache.values():
+                        entry["prompt"].pop(model_path, None)
                     logging.info(f'Unloaded SoVITS model: {model_path}')
                 else:
                     logging.warning(f'SoVITS model {model_path} not found.')
@@ -1450,7 +1463,7 @@ class TTS:
             self._empty_cache()
     
     @torch.inference_mode()
-    def cache_prompt_audio(self, prompt_audio_paths: str|list[str], prompt_audio_texts: str|list[str], prompt_language: Literal["auto", "ja", "zh", "en"] = "auto"):
+    def cache_prompt_audio(self, prompt_audio_paths: str|list[str], prompt_audio_texts: str|list[str], prompt_language: Literal["auto", "ja", "zh", "en"] = "auto", sovits_model: str = None):
         """
         Pre-processes and caches prompt audio data for faster inference.
 
@@ -1465,7 +1478,11 @@ class TTS:
                 logging.error('No SoVITS models are currently loaded! Cannot cache prompt audio.')
                 return
 
-            model = self.sovits_models[next(iter(self.sovits_models))]
+            if sovits_model is None:
+                sovits_model = next(iter(self.sovits_models))
+            if sovits_model not in self.sovits_models:
+                self.load_sovits_model(sovits_model)
+            model = self.sovits_models[sovits_model]
             
             if self.cnhubert_model is None:
                 self.cnhubert_model = CNHubert(self.cnhubert_path, self.tts_config)
@@ -1482,12 +1499,18 @@ class TTS:
                         "Please provide the text transcription for the reference audio (风格参考音频对应文本)."
                     )
                 prompt = self._get_prompt(self.cnhubert_model, model, prompt_audio_path)
-                phones1, _, bert1, _ = get_phones_and_bert(prompt_audio_text, self.tts_config, prompt_language)
-                self.prompt_audio_cache[prompt_audio_path] = {
-                    "prompt": prompt,
-                    "phones1": phones1,
-                    "bert1": bert1,
-                }
+                entry = self.prompt_audio_cache.get(prompt_audio_path)
+                if entry is None or entry.get("text") != prompt_audio_text or entry.get("language") != prompt_language:
+                    phones1, _, bert1, _ = get_phones_and_bert(prompt_audio_text, self.tts_config, prompt_language)
+                    entry = {
+                        "prompt": {},
+                        "phones1": phones1,
+                        "bert1": bert1,
+                        "text": prompt_audio_text,
+                        "language": prompt_language,
+                    }
+                    self.prompt_audio_cache[prompt_audio_path] = entry
+                entry["prompt"][sovits_model] = prompt
                 logging.info(f'Cached prompt audio: {prompt_audio_path}')
             
             if not self.always_load_cnhubert:
